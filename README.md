@@ -16,7 +16,7 @@ Paper: Livernoche et al., *OpenFake: An Open Dataset and Platform Toward Real-Wo
 
 ### Download dataset
 
-`python3 initialize_dataset.py`
+`python3 initialize_dataset.py --sample_size 100`
 
 The dataset will be downloaded and stored locally in:
 
