@@ -25,3 +25,9 @@ contextual-deepfake-detection/data/
 ```
 
 > Note: Do not upload the dataset to the repo as it is very large. It is currently ignored in `.gitignore` 
+
+This project explores the use of transformer-based architectures for
+binary classification of real vs. fake images. The current implementation
+uses a pretrained Vision Transformer (ViT-B/16) fine-tuned on a labeled
+dataset of real and manipulated images. Future implementations will use a
+hand crafted visual transformer. Main library is pythorch.
