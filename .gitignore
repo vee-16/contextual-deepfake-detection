@@ -11,6 +11,13 @@ env/
 data/*
 !data/.gitkeep
 
+# Training outputs
+results/
+
+# Model checkpoints / weights
+models/*.pth
+*.pth
+
 # Environment variables
 .env
 
