@@ -38,9 +38,13 @@ def load_subset():
 
 
 def get_dataset(sample_size: int):
-    """Load local subset if available, otherwise create it."""
+    """Load local subset if it exists and matches sample_size; otherwise create it."""
     if (DATA_PATH / "train").exists() and (DATA_PATH / "test").exists():
-        return load_subset()
+        train, test = load_subset()
+        if len(train) == sample_size and len(test) == sample_size:
+            return train, test
+        # Existing data has different size; recreate with requested size
+        print(f"Existing subset has {len(train)} train, {len(test)} test. Recreating with {sample_size} per split.")
     return create_subset(sample_size)
 
 

@@ -248,6 +248,46 @@ def evaluate(model, loader):
 
 
 # --------------------------
+# Collect predictions for evaluation
+# --------------------------
+def collect_predictions(model, loader):
+    """
+    Run the model on a dataloader and collect:
+    - y_true: ground-truth labels
+    - y_pred: predicted labels
+    - y_prob: probability of the 'fake' class (class index 1)
+    These are saved for later analysis in evaluation scripts.
+    """
+    model.eval()
+
+    all_probs = []
+    all_preds = []
+    all_labels = []
+
+    with torch.no_grad():
+        for images, labels in tqdm(loader, desc="Collecting predictions", leave=False):
+            images = images.to(device)
+            labels = labels.to(device)
+
+            outputs = model(images)
+
+            # Convert raw logits to probabilities for the fake class (index 1)
+            probs_fake = torch.softmax(outputs, dim=1)[:, 1]
+
+            _, predicted = torch.max(outputs, 1)
+
+            all_probs.extend(probs_fake.cpu().numpy())
+            all_preds.extend(predicted.cpu().numpy())
+            all_labels.extend(labels.cpu().numpy())
+
+    y_true = np.array(all_labels)
+    y_pred = np.array(all_preds)
+    y_prob = np.array(all_probs)
+
+    return y_true, y_pred, y_prob
+
+
+# --------------------------
 # Main
 # --------------------------
 def main():
@@ -271,10 +311,11 @@ def main():
     # Show whether we are running on GPU or CPU
     print("Using device:", device)
 
-    # Create unique results folder for this run so results don't overwrite each other 
-    # This is helpful when running multiple experiments
-    timestamp = time.strftime("%Y-%m-%d_%H-%M-%S")
-    run_dir = os.path.join(RESULTS_DIR, f"run_{timestamp}")
+    # Create unique results folder named by config (epochs, batch_size, lr) + time
+    time_suffix = time.strftime("%H%M%S")
+    lr_str = str(LEARNING_RATE).replace(".", "p")
+    run_name = f"epochs{EPOCHS}_bs{BATCH_SIZE}_lr{lr_str}_{time_suffix}"
+    run_dir = os.path.join(RESULTS_DIR, run_name)
     os.makedirs(run_dir, exist_ok=True)
 
     print("Saving results to:", run_dir)
@@ -339,6 +380,15 @@ def main():
     print("Recall:", test_metrics["recall"])
     print("F1 Score:", test_metrics["f1_score"])
     print("Confusion Matrix:\n", test_metrics["confusion_matrix"])
+
+    # Collect and save per-example predictions for evaluation
+    print("\nCollecting test set predictions for evaluation...")
+    y_true, y_pred, y_prob = collect_predictions(model, test_loader)
+
+    np.save(os.path.join(run_dir, "test_y_true.npy"), y_true)
+    np.save(os.path.join(run_dir, "test_y_pred.npy"), y_pred)
+    np.save(os.path.join(run_dir, "test_y_prob.npy"), y_prob)
+    print("Saved test_y_true.npy, test_y_pred.npy, and test_y_prob.npy")
 
     # Calculate total training time
     training_time = time.time() - start_time

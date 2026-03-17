@@ -57,6 +57,7 @@ contextual-deepfake-detection/
 
 Contextual_Deepfake_Detector.py   # main training script
 initialize_dataset.py             # dataset download script
+evaluate_run.py                   # evaluation for a run
 requirements.txt
 
 data/
@@ -107,9 +108,11 @@ The following metrics are computed:
     - Precision
     - Recall
     - F1 Score
+    - ROC-AUC
     - Confusion Matrix
 
-Results are automatically saved in: `results/run_xxx/`
+Results are saved per run in `results/<run_name>/` (e.g. `results/epochs12_bs32_lr0p0001_172242/`). To recompute and save detailed metrics for a run:  
+`python evaluate_run.py --run_dir results/<run_name>`
 
 ---------------------------------------------------------------------------------------------
 ---------------------------------------------------------------------------------------------   
@@ -120,9 +123,9 @@ Checkpoints are saved after every epoch:
     - Ex: `models/checkpoint_epoch_1.pth`
 
 After training finishes, the trained model weights are saved in the experiment results folder:
-    - `results/run_timestamp/baseline_vit.pth`
+    - `results/<run_name>/baseline_vit.pth`
 
 Reloading a trained model:
     `model = build_model()`
-    `model.load_state_dict(torch.load("results/run_xxx/baseline_vit.pth"))`
+    `model.load_state_dict(torch.load("results/<run_name>/baseline_vit.pth"))`
     `model.eval()`

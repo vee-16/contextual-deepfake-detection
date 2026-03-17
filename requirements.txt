@@ -1,8 +1,11 @@
 datasets
+matplotlib
+numpy
+pandas
 pillow
 pyarrow
+scikit-learn
+seaborn
 torch
 torchvision
 tqdm
-numpy
-scikit-learn
