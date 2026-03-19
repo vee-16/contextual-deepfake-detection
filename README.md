@@ -4,6 +4,61 @@ Beyond Binary Classification: Interpretable and Context Aware Deepfake Detection
 This project explores transformer-based architectures for detecting AI-generated images.
 The current baseline uses a pretrained Vision Transformer (ViT-B/16) fine-tuned to classify images as real or fake.
 
+
+---------------------------------------------------------------------------------------------
+---------------------------------------------------------------------------------------------
+
+# Run on UMBC HPCF (Optional)
+
+1. SSH into cluser: `ssh <username>@chip.rs.umbc.edu`
+
+Verify with DUO/sms code
+
+2. Move to group storage
+
+- Navigate to class directory: `cd /umbc/class/cmsc475sp26/common/`
+
+- Check existing group: `cd /umbc/class/cmsc475sp26/common/vsinha1_group/`
+
+- Or create a new group `mkdir -p <groupname>`
+
+- Clone repo:
+```sh
+cd <groupname>
+git clone https://github.com/vee-16/contextual-deepfake-detection.git
+cd contextual-deepfake-detection
+```
+
+3. Request compute node: `srun --gres=gpu:1 --mem=8G --time=01:00:00 --pty bash`
+
+- Jobs must be run on compute nodes, not login nodes due to storage limitations.
+
+- Sanity check: `hostname` (expected output: g20-xx)
+
+4. Load python module and create virtual environment
+
+```sh
+module load Python/3.11.5-GCCcore-13.2.0
+python -m venv .venv
+source .venv/bin/activate
+```
+
+5. Redirect Cache
+
+```sh
+export HF_HOME=/umbc/class/cmsc475sp26/common/<groupname>/hf_cache
+export TORCH_HOME=/umbc/class/cmsc475sp26/common/<groupname>/torch_cache
+
+mkdir -p $HF_HOME
+mkdir -p $TORCH_HOME
+
+```
+TODO:
+- [ ] look into tmux set up for persistent sessions
+- [ ] add instructions for ssh vscode client
+
+Continue to install dependencies and the pipeline
+
 ---------------------------------------------------------------------------------------------
 ---------------------------------------------------------------------------------------------
 # Install dependencies
