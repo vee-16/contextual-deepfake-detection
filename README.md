@@ -57,7 +57,7 @@ TODO:
 - [ ] look into tmux set up for persistent sessions
 - [ ] add instructions for ssh vscode client
 
-Continue to install dependencies and the pipeline
+Continue to install dependencies and run the pipeline
 
 ---------------------------------------------------------------------------------------------
 ---------------------------------------------------------------------------------------------
