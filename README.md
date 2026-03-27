@@ -138,6 +138,8 @@ Arguments:
 - --epochs: Number of training epochs
 - --batch_size: Training batch size
 - --lr: Learning rate
+- --load_model: Path to a saved model or checkpoint (skips training and runs evaluation/inference)
+- --num_saliency: Number of saliency maps to generate and save
 
 ---------------------------------------------------------------------------------------------
 ---------------------------------------------------------------------------------------------   
@@ -163,7 +165,7 @@ The following metrics are computed:
     - Precision
     - Recall
     - F1 Score
-    - ROC-AUC
+    - ROC-AUC *To be implemented*
     - Confusion Matrix
 
 Results are saved per run in `results/<run_name>/` (e.g. `results/epochs12_bs32_lr0p0001_172242/`). To recompute and save detailed metrics for a run:  
@@ -184,3 +186,59 @@ Reloading a trained model:
     `model = build_model()`
     `model.load_state_dict(torch.load("results/<run_name>/baseline_vit.pth"))`
     `model.eval()`
+    * This can be done automatically from the command line with:
+        `python Contextual_Deepfake_Detector.py --load_model "models/checkpoint_epoch_5.pth"` (Trained Model)
+        `python Contextual_Deepfake_Detector.py --load_model "results/<run_name>/baseline_vit.pth"` (Final Trained Model)
+
+
+---------------------------------------------------------------------------------------------
+---------------------------------------------------------------------------------------------   
+# Inference and Saliency Maps
+
+This project supports loading a trained model and generating saliency maps for interpretability.
+
+Using saliency maps is our first strategem for defining what in the image is causing it 
+to be labelled as fake or real
+
+TODO: Implement an occlusion map to identify most important region as opposed to specific pixels
+
+---------------------------------------------------------------------------------------------
+
+# Running Inference (No Training)
+
+To load a trained model and skip training:
+
+`python Contextual_Deepfake_Detector.py --load_model "models/checkpoint_epoch_5.pth"`
+
+You can also load a final trained model from a previous run:
+
+`python Contextual_Deepfake_Detector.py --load_model "results/<run_name>/baseline_vit.pth"`
+
+---------------------------------------------------------------------------------------------
+
+# Generating Saliency Maps
+
+To generate and save saliency maps:
+
+`python Contextual_Deepfake_Detector.py --load_model "models/checkpoint_epoch_5.pth" --num_saliency 10`
+
+This will:
+1. Load the trained model
+2. Run evaluation on the test set
+3. Generate saliency maps for a subset of test images
+4. Save visualizations to: results/<run_name>/saliency_maps/
+
+Each saved image includes:
+- Original image
+- Saliency heatmap
+- True label and predicted label
+- Model confidence scores
+
+---------------------------------------------------------------------------------------------
+
+# Notes on Saliency Maps
+
+- Saliency maps are computed using input gradients
+- Higher intensity regions indicate stronger influence on the model’s decision
+- We will implement an occlusion map using a similar technique to highlight the most
+  important area(s)

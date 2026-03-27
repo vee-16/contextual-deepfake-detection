@@ -15,6 +15,8 @@ from collections import Counter
 from sklearn.metrics import precision_score, recall_score, f1_score, confusion_matrix
 from tqdm import tqdm
 
+import matplotlib.pyplot as plt
+
 # --------------------------
 # Config
 # --------------------------
@@ -140,9 +142,10 @@ def build_dataloaders():
     test_dataset = full_test_dataset
 
     # Dataloaders handle batching and shuffling
-    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=4, pin_memory=True)
-    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=4, pin_memory=True)
-    test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=4, pin_memory=True)
+    use_pin_memory = (device.type == "cuda")
+    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=4, pin_memory=use_pin_memory)
+    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=4, pin_memory=use_pin_memory)
+    test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=4, pin_memory=use_pin_memory)
 
     print("\nAfter split:")
     print("Train samples:", len(train_dataset))
@@ -286,6 +289,208 @@ def collect_predictions(model, loader):
 
     return y_true, y_pred, y_prob
 
+# --------------------------
+# Saliency map
+# --------------------------
+def generate_saliency_map(model, image_tensor, target_class=None):
+    """
+    Generate a saliency map for a single image tensor.
+
+    Args:
+        model: trained PyTorch model
+        image_tensor: single image tensor of shape [3, H, W]
+        target_class: optional class index to explain.
+                      If None, uses the model's predicted class.
+
+    Returns:
+        saliency: 2D numpy array of shape [H, W]
+        predicted_class: int
+        predicted_probs: numpy array of class probabilities
+    """
+    model.eval()
+
+    # Add batch dimension and move to device
+    input_tensor = image_tensor.unsqueeze(0).to(device)
+
+    # We need gradients with respect to the input image
+    input_tensor.requires_grad_()
+
+    # Forward pass
+    output = model(input_tensor)
+
+    # Predicted class
+    predicted_class = output.argmax(dim=1).item()
+
+    # Use predicted class unless user specifies a target
+    if target_class is None:
+        target_class = predicted_class
+
+    # Zero existing gradients
+    model.zero_grad()
+
+    # Backprop only the score for the target class
+    score = output[0, target_class]
+    score.backward()
+
+    # Gradient of output w.r.t. input image
+    gradients = input_tensor.grad.detach().cpu()[0]   # [3, H, W]
+
+    # Standard saliency: max absolute gradient across color channels
+    saliency, _ = torch.max(torch.abs(gradients), dim=0)  # [H, W]
+
+    # Normalize saliency map to [0, 1]
+    saliency -= saliency.min()
+    if saliency.max() > 0:
+        saliency /= saliency.max()
+
+    # Probabilities for reference
+    probs = torch.softmax(output, dim=1).detach().cpu().numpy()[0]
+
+    return saliency.numpy(), predicted_class, probs
+
+
+# --------------------------
+# Visualization
+# --------------------------
+def show_saliency_map(image_tensor, saliency_map, true_label=None, predicted_class=None, class_names=None):
+    """
+    Display original image and its saliency map side by side.
+
+    Args:
+        image_tensor: tensor of shape [3, H, W]
+        saliency_map: numpy array of shape [H, W]
+        true_label: optional ground truth label
+        predicted_class: optional predicted class
+        class_names: optional dict like {0: "real", 1: "fake"}
+    """
+    if class_names is None:
+        class_names = {0: "real", 1: "fake"}
+
+    # Undo normalization for display
+    image = image_tensor.detach().cpu().clone()
+    image = image.permute(1, 2, 0).numpy()  # [H, W, C]
+
+    # Your transform used mean=0.5, std=0.5
+    image = (image * 0.5) + 0.5
+    image = np.clip(image, 0, 1)
+
+    title_parts = []
+    if true_label is not None:
+        title_parts.append(f"True: {class_names[true_label]}")
+    if predicted_class is not None:
+        title_parts.append(f"Pred: {class_names[predicted_class]}")
+    title_text = " | ".join(title_parts)
+
+    plt.figure(figsize=(10, 4))
+
+    plt.subplot(1, 2, 1)
+    plt.imshow(image)
+    plt.title("Original Image" + (f"\n{title_text}" if title_text else ""))
+    plt.axis("off")
+
+    plt.subplot(1, 2, 2)
+    plt.imshow(saliency_map, cmap="hot")
+    plt.title("Saliency Map")
+    plt.axis("off")
+
+    plt.tight_layout()
+    plt.show()
+
+def demo_saliency_on_sample(model, loader, sample_index=0):
+    """
+    Grab one sample from a dataloader and display its saliency map.
+    """
+    images, labels = next(iter(loader))
+
+    image_tensor = images[sample_index].cpu()
+    true_label = labels[sample_index].item()
+
+    saliency_map, predicted_class, probs = generate_saliency_map(model, image_tensor)
+
+    print("True label:", true_label)
+    print("Predicted class:", predicted_class)
+    print("Class probabilities:", probs)
+
+    show_saliency_map(
+        image_tensor=image_tensor,
+        saliency_map=saliency_map,
+        true_label=true_label,
+        predicted_class=predicted_class,
+        class_names={0: "real", 1: "fake"}
+    )
+
+def save_saliency_maps(model, loader, run_dir, num_samples=5):
+    """
+    Save saliency map visualizations for a few samples from the dataloader.
+
+    Args:
+        model: trained or loaded model
+        loader: dataloader to draw samples from
+        run_dir: directory where images should be saved
+        num_samples: number of saliency figures to save
+    """
+    saliency_dir = os.path.join(run_dir, "saliency_maps")
+    os.makedirs(saliency_dir, exist_ok=True)
+
+    class_names = {0: "real", 1: "fake"}
+
+    saved_count = 0
+    sample_global_index = 0
+
+    model.eval()
+
+    for images, labels in loader:
+        batch_size = images.size(0)
+
+        for i in range(batch_size):
+            if saved_count >= num_samples:
+                print(f"Saved {saved_count} saliency map(s) to: {saliency_dir}")
+                return
+
+            image_tensor = images[i].cpu()
+            true_label = labels[i].item()
+
+            saliency_map, predicted_class, probs = generate_saliency_map(model, image_tensor)
+
+            # Undo normalization for display
+            image = image_tensor.detach().cpu().clone()
+            image = image.permute(1, 2, 0).numpy()
+            image = (image * 0.5) + 0.5
+            image = np.clip(image, 0, 1)
+
+            plt.figure(figsize=(10, 4))
+
+            plt.subplot(1, 2, 1)
+            plt.imshow(image)
+            plt.title(
+                f"Original Image\nTrue: {class_names[true_label]} | Pred: {class_names[predicted_class]}"
+            )
+            plt.axis("off")
+
+            plt.subplot(1, 2, 2)
+            plt.imshow(saliency_map, cmap="hot")
+            plt.title(
+                f"Saliency Map\nP(real)={probs[0]:.4f}, P(fake)={probs[1]:.4f}"
+            )
+            plt.axis("off")
+
+            plt.tight_layout()
+
+            filename = (
+                f"sample_{sample_global_index}_true_{class_names[true_label]}"
+                f"_pred_{class_names[predicted_class]}.png"
+            )
+            save_path = os.path.join(saliency_dir, filename)
+            plt.savefig(save_path, bbox_inches="tight")
+            plt.close()
+
+            print(f"Saved saliency map: {save_path}")
+
+            saved_count += 1
+            sample_global_index += 1
+
+    print(f"Saved {saved_count} saliency map(s) to: {saliency_dir}")
+
 
 # --------------------------
 # Main
@@ -298,6 +503,8 @@ def main():
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--load_model", type=str, default=None)
+    parser.add_argument("--num_saliency", type=int, default=5)
 
     args = parser.parse_args()
 
@@ -314,7 +521,10 @@ def main():
     # Create unique results folder named by config (epochs, batch_size, lr) + time
     time_suffix = time.strftime("%H%M%S")
     lr_str = str(LEARNING_RATE).replace(".", "p")
-    run_name = f"epochs{EPOCHS}_bs{BATCH_SIZE}_lr{lr_str}_{time_suffix}"
+    if args.load_model is not None:
+        run_name = f"inference_{time_suffix}"
+    else:
+        run_name = f"epochs{EPOCHS}_bs{BATCH_SIZE}_lr{lr_str}_{time_suffix}"
     run_dir = os.path.join(RESULTS_DIR, run_name)
     os.makedirs(run_dir, exist_ok=True)
 
@@ -331,45 +541,60 @@ def main():
 
     # Build the model (Vision Transformer)
     model = build_model()
+    training_time = None
 
-    print("Starting training from pretrained ViT weights")
+    if args.load_model is not None:
 
-    # Track how long training takes
-    start_time = time.time()
+        loaded_obj = torch.load(args.load_model, map_location=device, weights_only=False)
+        if "model_state_dict" in loaded_obj:
+            model.load_state_dict(loaded_obj["model_state_dict"])
+        else:
+            model.load_state_dict(loaded_obj)
+        print(f"Loaded model from {args.load_model}")
+    else:
 
-    # Loss function used for classification
-    criterion = nn.CrossEntropyLoss()
+        print("Starting training from pretrained ViT weights")
 
-    # Adam optimizer updates model weights during training
-    optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
+        # Track how long training takes
+        start_time = time.time()
 
-    # Training loop
-    for epoch in range(EPOCHS):
+        # Loss function used for classification
+        criterion = nn.CrossEntropyLoss()
 
-        # Train model for one full pass through the dataset
-        train_loss = train_one_epoch(model, train_loader, criterion, optimizer)
+        # Adam optimizer updates model weights during training
+        optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
 
-        # Evaluate on validation set to see how model generalizes
-        val_metrics = evaluate(model, val_loader)
+        # Training loop
+        for epoch in range(EPOCHS):
 
-        print(f"\nEpoch {epoch + 1}/{EPOCHS}")
-        print("Loss:", train_loss)
-        print("Validation Accuracy:", val_metrics["accuracy"])
-        print("Validation Precision:", val_metrics["precision"])
-        print("Validation Recall:", val_metrics["recall"])
-        print("Validation F1:", val_metrics["f1_score"])
+            # Train model for one full pass through the dataset
+            train_loss = train_one_epoch(model, train_loader, criterion, optimizer)
 
-        # Save checkpoint after each epoch
-        # This allows us to resume training if something crashes
-        checkpoint_path = os.path.join(MODELS_DIR, f"checkpoint_epoch_{epoch+1}.pth")
+            # Evaluate on validation set to see how model generalizes
+            val_metrics = evaluate(model, val_loader)
 
-        torch.save({
-            "epoch": epoch,
-            "model_state_dict": model.state_dict(),
-            "optimizer_state_dict": optimizer.state_dict()
-        }, checkpoint_path)
+            print(f"\nEpoch {epoch + 1}/{EPOCHS}")
+            print("Loss:", train_loss)
+            print("Validation Accuracy:", val_metrics["accuracy"])
+            print("Validation Precision:", val_metrics["precision"])
+            print("Validation Recall:", val_metrics["recall"])
+            print("Validation F1:", val_metrics["f1_score"])
 
-        print(f"Checkpoint saved: {checkpoint_path}")
+            # Save checkpoint after each epoch
+            # This allows us to resume training if something crashes
+            checkpoint_path = os.path.join(MODELS_DIR, f"checkpoint_epoch_{epoch+1}.pth")
+
+            torch.save({
+                "epoch": epoch,
+                "model_state_dict": model.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict()
+            }, checkpoint_path)
+
+            print(f"Checkpoint saved: {checkpoint_path}")
+        
+        # Calculate total training time
+        training_time = time.time() - start_time
+        print("Training time (seconds):", training_time)
 
     # Post-training, do a final evaluation on test set
     test_metrics = evaluate(model, test_loader)
@@ -389,10 +614,6 @@ def main():
     np.save(os.path.join(run_dir, "test_y_pred.npy"), y_pred)
     np.save(os.path.join(run_dir, "test_y_prob.npy"), y_prob)
     print("Saved test_y_true.npy, test_y_pred.npy, and test_y_prob.npy")
-
-    # Calculate total training time
-    training_time = time.time() - start_time
-    print("Training time (seconds):", training_time)
 
     timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
 
@@ -432,7 +653,7 @@ def main():
             EPOCHS,
             BATCH_SIZE,
             LEARNING_RATE,
-            training_time,
+            training_time if training_time is not None else "N/A",
             test_metrics["accuracy"],
             test_metrics["precision"],
             test_metrics["recall"],
@@ -443,11 +664,14 @@ def main():
     cm_path = os.path.join(run_dir, "confusion_matrix.npy")
     np.save(cm_path, test_metrics["confusion_matrix"])
 
-    # Save the trained model, can be reloaded later without retraining
-    model_save_path = os.path.join(run_dir, "baseline_vit.pth")
-    torch.save(model.state_dict(), model_save_path)
-    print("Model saved to:", model_save_path)
+    if args.load_model is None:
+        # Save the trained model, can be reloaded later without retraining
+        model_save_path = os.path.join(run_dir, "baseline_vit.pth")
+        torch.save(model.state_dict(), model_save_path)
+        print("Model saved to:", model_save_path)
 
+    #demo_saliency_on_sample(model, test_loader, sample_index=0)
+    save_saliency_maps(model, test_loader, run_dir, num_samples=args.num_saliency)
 
 if __name__ == "__main__":
     main()
