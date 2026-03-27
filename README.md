@@ -165,7 +165,7 @@ The following metrics are computed:
     - Precision
     - Recall
     - F1 Score
-    - ROC-AUC *To be implemented*
+    - ROC-AUC
     - Confusion Matrix
 
 Results are saved per run in `results/<run_name>/` (e.g. `results/epochs12_bs32_lr0p0001_172242/`). To recompute and save detailed metrics for a run:  
@@ -242,3 +242,10 @@ Each saved image includes:
 - Higher intensity regions indicate stronger influence on the model’s decision
 - We will implement an occlusion map using a similar technique to highlight the most
   important area(s)
+
+---------------------------------------------------------------------------------------------
+
+# Example Commands
+
+python Contextual_Deepfake_Detector.py --epochs 5 --batch_size 32 --lr 0.0001 --num_saliency 5
+python Contextual_Deepfake_Detector.py --load_model models\checkpoint_epoch_5.pth --num_saliency 10
