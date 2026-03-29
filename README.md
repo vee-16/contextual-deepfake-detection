@@ -72,8 +72,8 @@ If you want to train using a GPU, install the CUDA compatible PyTorch version.
 Update/install pytorch if needed (older versions may not support GPU usage): 
     `pip3 install torch torchvision --index-url https://download.pytorch.org/whl/cu126`
 
-Verify your GPU is available for use when needed:
-    `print(torch.cuda.is_available())` true = available, false = unavailable
+Quick check that PyTorch sees and can use the GPU
+    `python check_gpu.py`
 
 If unavailable, your system/specs might not support it (CPU will be used). 
 
@@ -113,16 +113,18 @@ contextual-deepfake-detection/
 Contextual_Deepfake_Detector.py   # main training script
 initialize_dataset.py             # dataset download script
 evaluate_run.py                   # evaluation for a run
+check_gpu.py                      # GPU usage verification
 requirements.txt
 
 data/
     openfake/
 
-models/
-    checkpoints saved during training
-
 results/
-    experiment outputs and metrics
+    run_name/
+        predictions/
+        saliency_maps/
+        best_model.pth
+        detailed_metrics.csv
 
 ---------------------------------------------------------------------------------------------
 ---------------------------------------------------------------------------------------------   
@@ -132,7 +134,7 @@ Basic run:
 `python Contextual_Deepfake_Detector.py`
 
 Custom run:
-`python Contextual_Deepfake_Detector.py --epochs 10 --batch_size 32 --lr 0.0001`
+`python Contextual_Deepfake_Detector.py --epochs 10 --batch_size 32 --lr 0.0001 --num_saliency 10`
 
 Arguments:
 - --epochs: Number of training epochs
@@ -151,8 +153,10 @@ Arguments:
 4. Load pretrained Vision Transformer (ViT-B/16)
 5. Replace classification head for binary classification
 6. Train the model on real vs fake images
-7. Evaluate performance on validation and test sets
-8. Save metrics and trained model
+7. Evaluate performance on validation set during training
+8. Save best model based on validation accuracy
+9. Generate predictions on the test set
+10. Run evaluation script to compute final metrics
 
 Each experiment starts from pretrained ViT weights and trains independently. Trained models are saved inside the results folder.
 
@@ -160,7 +164,9 @@ Each experiment starts from pretrained ViT weights and trains independently. Tra
 ---------------------------------------------------------------------------------------------   
 # Evaluation Metrics
 
-The following metrics are computed: 
+Evaluation is performed using a separate script after predictions are saved.
+
+The following metrics are computed:
     - Accuracy
     - Precision
     - Recall
@@ -168,28 +174,27 @@ The following metrics are computed:
     - ROC-AUC
     - Confusion Matrix
 
-Results are saved per run in `results/<run_name>/` (e.g. `results/epochs12_bs32_lr0p0001_172242/`). To recompute and save detailed metrics for a run:  
-`python evaluate_run.py --run_dir results/<run_name>`
+After training or inference completes, the evaluation script runs automatically.
+
+You can also manually run evaluation:
+
+python evaluate_run.py --run_dir results/<run_name>
+
+Evaluation uses saved predictions:
+    results/<run_name>/predictions/
+        test_y_true.npy
+        test_y_pred.npy
+        test_y_prob.npy
 
 ---------------------------------------------------------------------------------------------
 ---------------------------------------------------------------------------------------------   
-# Model Checkpoints and Saving
+# Model Saving
 
-Checkpoints allow resuming of training incase of an unexpected crash.
-Checkpoints are saved after every epoch:
-    - Ex: `models/checkpoint_epoch_1.pth`
+During training, the model with the best validation accuracy is saved:
 
-After training finishes, the trained model weights are saved in the experiment results folder:
-    - `results/<run_name>/baseline_vit.pth`
+results/<run_name>/best_model.pth
 
-Reloading a trained model:
-    `model = build_model()`
-    `model.load_state_dict(torch.load("results/<run_name>/baseline_vit.pth"))`
-    `model.eval()`
-    * This can be done automatically from the command line with:
-        `python Contextual_Deepfake_Detector.py --load_model "models/checkpoint_epoch_5.pth"` (Trained Model)
-        `python Contextual_Deepfake_Detector.py --load_model "results/<run_name>/baseline_vit.pth"` (Final Trained Model)
-
+This ensures the best-performing model is used for evaluation and inference.
 
 ---------------------------------------------------------------------------------------------
 ---------------------------------------------------------------------------------------------   
@@ -208,11 +213,10 @@ TODO: Implement an occlusion map to identify most important region as opposed to
 
 To load a trained model and skip training:
 
-`python Contextual_Deepfake_Detector.py --load_model "models/checkpoint_epoch_5.pth"`
+`python Contextual_Deepfake_Detector.py --load_model results/<run_name>/best_model.pth"`
 
-You can also load a final trained model from a previous run:
-
-`python Contextual_Deepfake_Detector.py --load_model "results/<run_name>/baseline_vit.pth"`
+Example:
+`python Contextual_Deepfake_Detector.py --load_model results/vit_e5_bs32_lr0p0001_20260329_104307/best_model.pth`
 
 ---------------------------------------------------------------------------------------------
 
@@ -224,7 +228,7 @@ To generate and save saliency maps:
 
 This will:
 1. Load the trained model
-2. Run evaluation on the test set
+2. Run model on the test set to generate predictions
 3. Generate saliency maps for a subset of test images
 4. Save visualizations to: results/<run_name>/saliency_maps/
 
@@ -248,4 +252,4 @@ Each saved image includes:
 # Example Commands
 
 python Contextual_Deepfake_Detector.py --epochs 5 --batch_size 32 --lr 0.0001 --num_saliency 5
-python Contextual_Deepfake_Detector.py --load_model models\checkpoint_epoch_5.pth --num_saliency 10
+python Contextual_Deepfake_Detector.py --load_model results/<run_name>/best_model.pth --num_saliency 10

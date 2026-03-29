@@ -6,6 +6,8 @@ import torch.nn as nn
 import torch.optim as optim
 import numpy as np
 import argparse
+import subprocess
+import random
 
 from torchvision import transforms
 from torchvision.models import vit_b_16, ViT_B_16_Weights
@@ -23,11 +25,9 @@ import matplotlib.pyplot as plt
 # Paths and directories
 TRAIN_PATH = "data/openfake/train"
 TEST_PATH = "data/openfake/test"
-MODELS_DIR = "models"
 RESULTS_DIR = "results"
 
 # Create folders if they don't already exist
-os.makedirs(MODELS_DIR, exist_ok=True)
 os.makedirs(RESULTS_DIR, exist_ok=True)
 
 # These will be set from command line arguments later
@@ -143,9 +143,9 @@ def build_dataloaders():
 
     # Dataloaders handle batching and shuffling
     use_pin_memory = (device.type == "cuda")
-    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=4, pin_memory=use_pin_memory)
-    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=4, pin_memory=use_pin_memory)
-    test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=4, pin_memory=use_pin_memory)
+    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=8, pin_memory=use_pin_memory)
+    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=8, pin_memory=use_pin_memory)
+    test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=8, pin_memory=use_pin_memory)
 
     print("\nAfter split:")
     print("Train samples:", len(train_dataset))
@@ -224,7 +224,7 @@ def evaluate(model, loader):
 
     # Compute evaluation metrics
     # Accuracy = how many predictions were correct
-    accuracy = sum([p == l for p, l in zip(all_preds, all_labels)]) / len(all_labels)
+    accuracy = np.mean(np.array(all_preds) == np.array(all_labels))
 
     # Precision = of the samples predicted fake, how many were actually fake
     precision = precision_score(all_labels, all_preds, zero_division=0)
@@ -432,64 +432,53 @@ def save_saliency_maps(model, loader, run_dir, num_samples=5):
     saliency_dir = os.path.join(run_dir, "saliency_maps")
     os.makedirs(saliency_dir, exist_ok=True)
 
-    class_names = {0: "real", 1: "fake"}
+    # Get random indices from dataset
+    dataset_size = len(loader.dataset)
+    selected_indices = random.sample(range(dataset_size), num_samples)
 
-    saved_count = 0
-    sample_global_index = 0
+    class_names = {0: "real", 1: "fake"}
 
     model.eval()
 
-    for images, labels in loader:
-        batch_size = images.size(0)
+    for idx in selected_indices:
+        image_tensor, true_label = loader.dataset[idx]
+        image_tensor = image_tensor.cpu()
 
-        for i in range(batch_size):
-            if saved_count >= num_samples:
-                print(f"Saved {saved_count} saliency map(s) to: {saliency_dir}")
-                return
+        saliency_map, predicted_class, probs = generate_saliency_map(model, image_tensor)
 
-            image_tensor = images[i].cpu()
-            true_label = labels[i].item()
+        # Undo normalization for display
+        image = image_tensor.detach().cpu().clone()
+        image = image.permute(1, 2, 0).numpy()
+        image = (image * 0.5) + 0.5
+        image = np.clip(image, 0, 1)
 
-            saliency_map, predicted_class, probs = generate_saliency_map(model, image_tensor)
+        plt.figure(figsize=(10, 4))
 
-            # Undo normalization for display
-            image = image_tensor.detach().cpu().clone()
-            image = image.permute(1, 2, 0).numpy()
-            image = (image * 0.5) + 0.5
-            image = np.clip(image, 0, 1)
+        plt.subplot(1, 2, 1)
+        plt.imshow(image)
+        plt.title(
+            f"Original Image\nTrue: {class_names[true_label]} | Pred: {class_names[predicted_class]}"
+        )
+        plt.axis("off")
 
-            plt.figure(figsize=(10, 4))
+        plt.subplot(1, 2, 2)
+        plt.imshow(saliency_map, cmap="hot")
+        plt.title(
+            f"Saliency Map\nP(real)={probs[0]:.4f}, P(fake)={probs[1]:.4f}"
+        )
+        plt.axis("off")
 
-            plt.subplot(1, 2, 1)
-            plt.imshow(image)
-            plt.title(
-                f"Original Image\nTrue: {class_names[true_label]} | Pred: {class_names[predicted_class]}"
-            )
-            plt.axis("off")
+        plt.tight_layout()
 
-            plt.subplot(1, 2, 2)
-            plt.imshow(saliency_map, cmap="hot")
-            plt.title(
-                f"Saliency Map\nP(real)={probs[0]:.4f}, P(fake)={probs[1]:.4f}"
-            )
-            plt.axis("off")
+        filename = f"sample_{idx}_true_{class_names[true_label]}_pred_{class_names[predicted_class]}.png"
+        save_path = os.path.join(saliency_dir, filename)
 
-            plt.tight_layout()
+        plt.savefig(save_path, bbox_inches="tight")
+        plt.close()
 
-            filename = (
-                f"sample_{sample_global_index}_true_{class_names[true_label]}"
-                f"_pred_{class_names[predicted_class]}.png"
-            )
-            save_path = os.path.join(saliency_dir, filename)
-            plt.savefig(save_path, bbox_inches="tight")
-            plt.close()
+        print(f"Saved saliency map: {save_path}")
 
-            print(f"Saved saliency map: {save_path}")
-
-            saved_count += 1
-            sample_global_index += 1
-
-    print(f"Saved {saved_count} saliency map(s) to: {saliency_dir}")
+    print(f"Saved {num_samples} saliency map(s) to: {saliency_dir}")
 
 
 # --------------------------
@@ -518,18 +507,25 @@ def main():
     # Show whether we are running on GPU or CPU
     print("Using device:", device)
 
+    # --------------------------
+    # Run folder
+    # --------------------------
     # Create unique results folder named by config (epochs, batch_size, lr) + time
-    time_suffix = time.strftime("%H%M%S")
+    time_suffix = time.strftime("%Y%m%d_%H%M%S")
     lr_str = str(LEARNING_RATE).replace(".", "p")
     if args.load_model is not None:
         run_name = f"inference_{time_suffix}"
     else:
-        run_name = f"epochs{EPOCHS}_bs{BATCH_SIZE}_lr{lr_str}_{time_suffix}"
+        run_name = f"vit_e{EPOCHS}_bs{BATCH_SIZE}_lr{lr_str}_{time_suffix}"
+        
     run_dir = os.path.join(RESULTS_DIR, run_name)
     os.makedirs(run_dir, exist_ok=True)
 
     print("Saving results to:", run_dir)
 
+    # --------------------------
+    # Data
+    # --------------------------
     # Load dataset and build dataloaders
     # dataloaders handle batching, shuffling, and parallel loading
     train_loader, val_loader, test_loader = build_dataloaders()
@@ -539,20 +535,30 @@ def main():
     val_size = len(val_loader.dataset)
     test_size = len(test_loader.dataset)
 
+    # --------------------------
+    # Model
+    # --------------------------
     # Build the model (Vision Transformer)
     model = build_model()
     training_time = None
+    best_val_acc = 0.0
+    best_model_path = os.path.join(run_dir, "best_model.pth")
 
+    # --------------------------
+    # LOAD MODEL (if provided)
+    # --------------------------
     if args.load_model is not None:
+        print(f"Loading model from {args.load_model}")
 
-        loaded_obj = torch.load(args.load_model, map_location=device, weights_only=False)
-        if "model_state_dict" in loaded_obj:
+        loaded_obj = torch.load(args.load_model, map_location=device)
+
+        if isinstance(loaded_obj, dict) and "model_state_dict" in loaded_obj:
             model.load_state_dict(loaded_obj["model_state_dict"])
         else:
             model.load_state_dict(loaded_obj)
-        print(f"Loaded model from {args.load_model}")
-    else:
 
+        model.eval()
+    else:
         print("Starting training from pretrained ViT weights")
 
         # Track how long training takes
@@ -564,7 +570,9 @@ def main():
         # Adam optimizer updates model weights during training
         optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
 
-        # Training loop
+        # --------------------------
+        # TRAINING LOOP
+        # --------------------------
         for epoch in range(EPOCHS):
 
             # Train model for one full pass through the dataset
@@ -573,105 +581,57 @@ def main():
             # Evaluate on validation set to see how model generalizes
             val_metrics = evaluate(model, val_loader)
 
+            if val_metrics["accuracy"] > best_val_acc:
+                best_val_acc = val_metrics["accuracy"]
+
+                torch.save(model.state_dict(), best_model_path)
+                print(f"Saved BEST model -> {best_model_path}")
+
             print(f"\nEpoch {epoch + 1}/{EPOCHS}")
             print("Loss:", train_loss)
             print("Validation Accuracy:", val_metrics["accuracy"])
             print("Validation Precision:", val_metrics["precision"])
             print("Validation Recall:", val_metrics["recall"])
             print("Validation F1:", val_metrics["f1_score"])
-
-            # Save checkpoint after each epoch
-            # This allows us to resume training if something crashes
-            checkpoint_path = os.path.join(MODELS_DIR, f"checkpoint_epoch_{epoch+1}.pth")
-
-            torch.save({
-                "epoch": epoch,
-                "model_state_dict": model.state_dict(),
-                "optimizer_state_dict": optimizer.state_dict()
-            }, checkpoint_path)
-
-            print(f"Checkpoint saved: {checkpoint_path}")
         
         # Calculate total training time
         training_time = time.time() - start_time
         print("Training time (seconds):", training_time)
 
-    # Post-training, do a final evaluation on test set
-    test_metrics = evaluate(model, test_loader)
+        # IMPORTANT: Load BEST model before evaluation
+        print("Loading best model for final evaluation...")
+        model.load_state_dict(torch.load(best_model_path, map_location=device))
+        model.eval()
 
-    print("\nFinal Test Metrics")
-    print("Accuracy:", test_metrics["accuracy"])
-    print("Precision:", test_metrics["precision"])
-    print("Recall:", test_metrics["recall"])
-    print("F1 Score:", test_metrics["f1_score"])
-    print("Confusion Matrix:\n", test_metrics["confusion_matrix"])
-
+    # --------------------------
+    # SAVE PREDICTIONS
+    # --------------------------
     # Collect and save per-example predictions for evaluation
     print("\nCollecting test set predictions for evaluation...")
     y_true, y_pred, y_prob = collect_predictions(model, test_loader)
 
-    np.save(os.path.join(run_dir, "test_y_true.npy"), y_true)
-    np.save(os.path.join(run_dir, "test_y_pred.npy"), y_pred)
-    np.save(os.path.join(run_dir, "test_y_prob.npy"), y_prob)
-    print("Saved test_y_true.npy, test_y_pred.npy, and test_y_prob.npy")
+    pred_dir = os.path.join(run_dir, "predictions")
+    os.makedirs(pred_dir, exist_ok=True)
 
-    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    np.save(os.path.join(pred_dir, "test_y_true.npy"), y_true)
+    np.save(os.path.join(pred_dir, "test_y_pred.npy"), y_pred)
+    np.save(os.path.join(pred_dir, "test_y_prob.npy"), y_prob)
 
-    # Save results to CSV so we can compare experiments later
-    results_file = os.path.join(run_dir, "baseline_results.csv")
+    print("Saved predictions to predictions/ folder")
 
-    file_exists = os.path.isfile(results_file)
-
-    with open(results_file, mode="a", newline="") as f:
-        writer = csv.writer(f)
-
-        # Write header if file doesn't exist yet
-        if not file_exists:
-            writer.writerow([
-                "timestamp",
-                "device",
-                "train_size",
-                "val_size",
-                "test_size",
-                "epochs",
-                "batch_size",
-                "learning_rate",
-                "training_time_seconds",
-                "accuracy",
-                "precision",
-                "recall",
-                "f1_score"
-            ])
-
-        # Write experiment results
-        writer.writerow([
-            timestamp,
-            device.type,
-            train_size,
-            val_size,
-            test_size,
-            EPOCHS,
-            BATCH_SIZE,
-            LEARNING_RATE,
-            training_time if training_time is not None else "N/A",
-            test_metrics["accuracy"],
-            test_metrics["precision"],
-            test_metrics["recall"],
-            test_metrics["f1_score"]
-        ])
-    
-    # Save confusion matrix separately for visualization later
-    cm_path = os.path.join(run_dir, "confusion_matrix.npy")
-    np.save(cm_path, test_metrics["confusion_matrix"])
-
-    if args.load_model is None:
-        # Save the trained model, can be reloaded later without retraining
-        model_save_path = os.path.join(run_dir, "baseline_vit.pth")
-        torch.save(model.state_dict(), model_save_path)
-        print("Model saved to:", model_save_path)
-
+    # --------------------------
+    # SALIENCY
+    # --------------------------
     #demo_saliency_on_sample(model, test_loader, sample_index=0)
     save_saliency_maps(model, test_loader, run_dir, num_samples=args.num_saliency)
+
+    # --------------------------
+    # FINAL EVALUATION
+    # --------------------------
+    subprocess.run([
+    "python", "evaluate_run.py",
+    "--run_dir", run_dir
+])
 
 if __name__ == "__main__":
     main()
