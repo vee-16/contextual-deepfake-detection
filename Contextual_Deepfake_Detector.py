@@ -19,6 +19,9 @@ from tqdm import tqdm
 
 import matplotlib.pyplot as plt
 
+from PIL import Image
+from io import BytesIO
+
 # --------------------------
 # Config
 # --------------------------
@@ -79,8 +82,18 @@ class OpenFakeTorchDataset(Dataset):
     def __getitem__(self, idx):
         sample = self.dataset[idx]
 
-        # Convert image to RGB
-        image = sample["image"].convert("RGB")
+        # load_from_disk may return image as a dict {"bytes": ..., "path": ...}
+        # or as a PIL Image depending on dataset version — handle both safely
+        img_data = sample["image"]
+        try:
+            if isinstance(img_data, dict) and "bytes" in img_data:
+                image = Image.open(BytesIO(img_data["bytes"])).convert("RGB")
+            else:
+                image = img_data.convert("RGB")
+        except Exception:
+            # Fallback for corrupted images
+            image = Image.new("RGB", (224, 224), (0, 0, 0))
+
         label_str = sample["label"]
 
         # Basic sanity check
@@ -288,6 +301,278 @@ def collect_predictions(model, loader):
     y_prob = np.array(all_probs)
 
     return y_true, y_pred, y_prob
+
+
+# --------------------------
+# Attention extraction
+# --------------------------
+def extract_all_attention_weights(model, image_tensor):
+    """
+    Extract attention weights from ALL 12 transformer blocks of ViT_B_16.
+
+    torchvision's MHA internally calls F.multi_head_attention_forward with
+    need_weights=False, so forward hooks always receive None for attn_weights.
+    The fix is to manually run each encoder layer step-by-step, calling the
+    self-attention module directly with need_weights=True.
+
+    We replicate the ViT encoder forward pass:
+      1. Patch embedding + CLS token + positional embedding  (model.encoder)
+      2. For each of the 12 EncoderBlock layers:
+           a. LayerNorm
+           b. Self-attention (called directly with need_weights=True)
+           c. Residual add
+           d. LayerNorm + MLP + residual
+
+    Returns:
+        all_attn: list of 12 numpy arrays, each [num_heads, num_tokens, num_tokens]
+    """
+    model.eval()
+    input_tensor = image_tensor.unsqueeze(0).to(device)  # [1, 3, 224, 224]
+
+    all_attn = []
+
+    with torch.no_grad():
+        # Step 1: patch embedding -> [1, 197, hidden_dim]
+        x = model._process_input(input_tensor)
+
+        # Prepend CLS token
+        n = x.shape[0]
+        cls_token = model.class_token.expand(n, -1, -1)
+        x = torch.cat([cls_token, x], dim=1)   # [1, 197, 768]
+
+        # Add positional embedding
+        x = model.encoder.dropout(x + model.encoder.pos_embedding)
+
+        # Step 2: manually forward through each EncoderBlock
+        for layer in model.encoder.layers:
+
+            # --- Self-attention sub-block ---
+            # LayerNorm before attention
+            x_norm = layer.ln_1(x)
+
+            # Call MHA directly with need_weights=True
+            # torchvision ViT uses batch_first=True so we pass as-is
+            # average_attn_weights=False keeps per-head weights intact
+            attn_out, attn_weights = layer.self_attention(
+                x_norm, x_norm, x_norm,
+                need_weights=True,
+                average_attn_weights=False,
+            )
+            # attn_weights: [batch, num_heads, num_tokens, num_tokens]
+            all_attn.append(attn_weights[0].cpu().numpy())  # [num_heads, 197, 197]
+
+            # Residual connection after attention
+            x = x + layer.dropout(attn_out)
+
+            # --- MLP sub-block ---
+            x = x + layer.mlp(layer.ln_2(x))
+
+        # Final layernorm
+        x = model.encoder.ln(x)
+
+    if len(all_attn) == 0:
+        raise RuntimeError("No attention weights extracted — check model architecture.")
+
+    return all_attn  # list of 12 arrays, each [num_heads, 197, 197]
+
+
+# --------------------------
+# Perplexity scoring
+# --------------------------
+def compute_patch_perplexity(attn_last_layer: np.ndarray) -> np.ndarray:
+    """
+    Compute per-patch perplexity from the last transformer layer's attention.
+
+    For each patch token, we look at the column of attention it receives from
+    all other tokens. The entropy of that distribution measures how 'surprising'
+    or uncertain the model is about that patch.
+
+    Perplexity = exp(entropy). Higher = more anomalous patch.
+
+    Steps:
+    1. Average attention over all heads -> [num_tokens, num_tokens]
+    2. Take columns (attention received by each token)
+    3. Renormalize each column to a valid distribution
+    4. Compute entropy per token
+    5. Exponentiate to get perplexity
+    6. Drop CLS token, return patch tokens only [196]
+
+    Args:
+        attn_last_layer: [num_heads, num_tokens, num_tokens]
+
+    Returns:
+        perplexity: [196] per-patch perplexity scores
+    """
+    # Average over heads -> [num_tokens, num_tokens]
+    mean_attn = attn_last_layer.mean(axis=0)
+
+    # Transpose: attn_cols[i] = distribution of attention received by token i
+    attn_cols = mean_attn.T                                       # [num_tokens, num_tokens]
+    attn_cols = np.clip(attn_cols, 1e-9, 1.0)
+    attn_cols = attn_cols / attn_cols.sum(axis=1, keepdims=True)  # renormalize
+
+    # Entropy per token: H = -sum(p * log(p))
+    entropy = -np.sum(attn_cols * np.log(attn_cols), axis=1)      # [num_tokens]
+
+    # Perplexity = exp(entropy)
+    perplexity = np.exp(entropy)
+
+    # Drop CLS token (index 0), return patch tokens [196]
+    return perplexity[1:]
+
+
+# --------------------------
+# CLS entropy scoring
+# --------------------------
+def compute_cls_entropy(attn_last_layer: np.ndarray) -> float:
+    """
+    Compute the entropy of the CLS token's attention distribution.
+
+    The CLS token aggregates information from all patches to make the
+    final real/fake decision. Its attention row tells us which patches
+    it focuses on.
+
+    Real images tend to have higher CLS entropy (spread attention, complex scenes).
+    Fake images tend to have lower CLS entropy (more focused, less coherent scenes).
+
+    Note: this score is negated in evaluate_run.py so that higher = more likely fake,
+    consistent with perplexity and rollout directions.
+
+    Args:
+        attn_last_layer: [num_heads, num_tokens, num_tokens]
+
+    Returns:
+        cls_entropy: scalar float (raw, un-negated)
+    """
+    # Average over heads -> [num_tokens, num_tokens]
+    mean_attn = attn_last_layer.mean(axis=0)
+
+    # CLS token is index 0 — its attention row over all other tokens
+    cls_attn = mean_attn[0]                  # [num_tokens]
+    cls_attn = np.clip(cls_attn, 1e-9, 1.0)
+    cls_attn = cls_attn / cls_attn.sum()     # normalize
+
+    # Shannon entropy
+    entropy = -np.sum(cls_attn * np.log(cls_attn))
+    return float(entropy)
+
+
+# --------------------------
+# Attention rollout
+# --------------------------
+def compute_attention_rollout(all_attn_layers: list) -> np.ndarray:
+    """
+    Compute attention rollout across all 12 transformer layers.
+
+    Rollout (Abnar & Zuidema, 2020) propagates attention through the network
+    by multiplying attention matrices layer by layer, with a residual connection
+    (identity matrix added at each step). This captures how information flows
+    from patches all the way to the CLS token through the full network depth.
+
+    This tells us which patches ultimately influence the final decision,
+    accounting for object-level relationships built up across all layers —
+    not just the last layer's attention.
+
+    Steps per layer:
+    1. Average attention over heads
+    2. Add identity matrix (residual connection)
+    3. Renormalize rows
+    4. Matrix multiply with running rollout
+
+    Finally: extract CLS row -> how much each patch contributes to the
+    final classification through the entire network.
+
+    Args:
+        all_attn_layers: list of 12 arrays, each [num_heads, num_tokens, num_tokens]
+
+    Returns:
+        rollout_patches: [196] — rollout score per patch token
+    """
+    num_tokens = all_attn_layers[0].shape[-1]
+
+    # Start with identity (perfect information flow before any attention)
+    rollout = np.eye(num_tokens)
+
+    for attn in all_attn_layers:
+        # Average over heads -> [num_tokens, num_tokens]
+        mean_attn = attn.mean(axis=0)
+
+        # Add residual connection: each token also attends to itself
+        attn_with_residual = mean_attn + np.eye(num_tokens)
+
+        # Renormalize rows so they sum to 1
+        attn_with_residual = attn_with_residual / attn_with_residual.sum(axis=-1, keepdims=True)
+
+        # Propagate: multiply running rollout by this layer's attention
+        rollout = attn_with_residual @ rollout
+
+    # CLS token is index 0 — its row tells us patch influence on final decision
+    cls_rollout = rollout[0]          # [num_tokens]
+
+    # Drop CLS self-attention (index 0), keep patch tokens [196]
+    rollout_patches = cls_rollout[1:]
+    return rollout_patches
+
+
+# --------------------------
+# Collect attention scores across test set
+# --------------------------
+def collect_attention_scores(model, loader):
+    """
+    Run all three attention-based scores over the entire test loader.
+
+    For each image:
+    - Extract attention from all 12 layers
+    - Compute perplexity [196], CLS entropy [scalar], rollout [196]
+
+    Results saved as flat arrays:
+    - perplexity_scores: [N, 196]  — per-patch perplexity per image
+    - cls_entropy_scores: [N]      — global entropy per image
+    - rollout_scores: [N, 196]     — rollout patch influence per image
+
+    Args:
+        model: trained ViT model
+        loader: test DataLoader
+
+    Returns:
+        perplexity_scores, cls_entropy_scores, rollout_scores
+    """
+    all_perplexity = []
+    all_cls_entropy = []
+    all_rollout = []
+
+    dataset = loader.dataset
+    print(f"\nCollecting attention scores for {len(dataset)} test samples...")
+
+    for idx in tqdm(range(len(dataset)), desc="Attention scoring"):
+        image_tensor, _ = dataset[idx]
+
+        try:
+            all_attn = extract_all_attention_weights(model, image_tensor)
+        except RuntimeError as e:
+            print(f"Warning: could not extract attention for sample {idx}: {e}")
+            # Fill with zeros if extraction fails so arrays stay aligned
+            all_perplexity.append(np.zeros(196))
+            all_cls_entropy.append(0.0)
+            all_rollout.append(np.zeros(196))
+            continue
+
+        last_layer_attn = all_attn[-1]
+
+        perplexity = compute_patch_perplexity(last_layer_attn)
+        cls_entropy = compute_cls_entropy(last_layer_attn)
+        rollout = compute_attention_rollout(all_attn)
+
+        all_perplexity.append(perplexity)
+        all_cls_entropy.append(cls_entropy)
+        all_rollout.append(rollout)
+
+    return (
+        np.array(all_perplexity),      # [N, 196]
+        np.array(all_cls_entropy),     # [N]
+        np.array(all_rollout),         # [N, 196]
+    )
+
 
 # --------------------------
 # Saliency map
@@ -618,6 +903,21 @@ def main():
     np.save(os.path.join(pred_dir, "test_y_prob.npy"), y_prob)
 
     print("Saved predictions to predictions/ folder")
+
+    # --------------------------
+    # SAVE ATTENTION SCORES
+    # Perplexity, CLS entropy, and rollout are computed here and saved
+    # as .npy files. evaluate_run.py loads these for analysis and heatmaps.
+    # --------------------------
+    perplexity_scores, cls_entropy_scores, rollout_scores = collect_attention_scores(
+        model, test_loader
+    )
+
+    np.save(os.path.join(pred_dir, "test_perplexity.npy"), perplexity_scores)
+    np.save(os.path.join(pred_dir, "test_cls_entropy.npy"), cls_entropy_scores)
+    np.save(os.path.join(pred_dir, "test_rollout.npy"), rollout_scores)
+
+    print("Saved attention scores to predictions/ folder")
 
     # --------------------------
     # SALIENCY

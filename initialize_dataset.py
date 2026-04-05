@@ -1,4 +1,4 @@
-from datasets import load_dataset, Dataset, load_from_disk
+from datasets import load_dataset, Dataset, load_from_disk, Features, Value
 from pathlib import Path
 import argparse
 
@@ -13,14 +13,40 @@ import argparse
 
 DATA_PATH = Path("data/openfake")
 
+
+def safe_take(stream, n):
+    samples = []
+    for example in stream:
+        samples.append(example)
+        if len(samples) == n:
+            break
+    return samples
+
+
 def create_subset(sample_size: int):
-    dataset = load_dataset("ComplexDataLab/OpenFake", streaming=True)
+    features = Features({
+        "image": {
+            "bytes": Value("binary"),
+            "path": Value("string"),
+        },
+        "prompt": Value("string"),
+        "label": Value("string"),
+        "model": Value("string"),
+        "type": Value("string"),
+        "release_date": Value("string"),
+    })
 
-    train_stream = dataset["train"].shuffle(seed=42, buffer_size=1000)
-    test_stream = dataset["test"].shuffle(seed=42, buffer_size=1000)
+    dataset = load_dataset(
+        "ComplexDataLab/OpenFake",
+        streaming=True,
+        features=features
+    )
 
-    train_samples = list(train_stream.take(sample_size))
-    test_samples = list(test_stream.take(sample_size))
+    train_stream = dataset["train"].shuffle(seed=42, buffer_size=5000)
+    test_stream = dataset["test"].shuffle(seed=42, buffer_size=5000)
+
+    train_samples = safe_take(train_stream, sample_size)
+    test_samples = safe_take(test_stream, sample_size)
 
     train_ds = Dataset.from_list(train_samples)
     test_ds = Dataset.from_list(test_samples)
@@ -48,6 +74,7 @@ def get_dataset(sample_size: int):
             return train, test
         # Existing data has different size; recreate with requested size
         print(f"Existing subset has {len(train)} train, {len(test)} test. Recreating with {sample_size} per split.")
+
     return create_subset(sample_size)
 
 
