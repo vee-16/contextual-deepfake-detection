@@ -200,8 +200,6 @@ This project supports loading a trained model and generating saliency maps for i
 Using saliency maps is our first strategem for defining what in the image is causing it 
 to be labelled as fake or real
 
-TODO: Implement an occlusion map to identify most important region as opposed to specific pixels
-
 ---------------------------------------------------------------------------------------------
 
 # Running Inference (No Training)
@@ -249,3 +247,68 @@ Each saved image includes:
 
 python Contextual_Deepfake_Detector.py --epochs 5 --batch_size 32 --lr 0.0001 --num_saliency 5
 python Contextual_Deepfake_Detector.py --load_model models\checkpoint_epoch_5.pth --num_saliency 10
+
+---------------------------------------------------------------------------------------------
+
+# Occlusion Maps and Important Regions
+
+In addition to saliency maps, this project implements **occlusion-based interpretability**.
+
+Instead of looking at gradients, occlusion maps systematically cover (mask) parts of the image
+and measure how much the model’s prediction changes. This allows us to identify the **most
+important region** for the final classification.
+
+For each image, two outputs are generated:
+1. **Occlusion Map** (heatmap)
+2. **Occlusion Box** (single most important region outlined on the original image)
+
+---------------------------------------------------------------------------------------------
+
+# Generating Occlusion Maps
+
+To generate occlusion maps, use the following arguments:
+
+- `--num_occlusion`: Number of images to process
+- `--occlusion_patch`: Size of the square patch (fixed mode)
+- `--occlusion_stride`: Step size for sliding window
+- `--use_auto_patch_size`: Automatically select best patch size
+- `--occlusion_box_color`: Color of the outlined box (default: black)
+
+Outputs are saved to:
+results/<run_name>/occlusion_maps/
+results/<run_name>/occlusion_boxes/
+
+Each result includes:
+- Original image
+- Occlusion heatmap
+- Highest-impact region outlined on the original image
+- Model predictions and probabilities
+
+---------------------------------------------------------------------------------------------
+
+# Example Commands (Occlusion)
+
+### Fixed patch size
+Uses a constant patch size and stride (faster, more predictable):
+
+python Contextual_Deepfake_Detector.py --load_model "models/checkpoint_epoch_5.pth"
+--num_occlusion 5
+--occlusion_patch 32
+--occlusion_stride 16
+--occlusion_box_color black
+
+### Auto patch size
+Automatically selects the patch size that produces the strongest signal (slower, better visualization):
+
+python Contextual_Deepfake_Detector.py
+--load_model "models/checkpoint_epoch_5.pth"
+--num_occlusion 5
+--use_auto_patch_size
+--occlusion_box_color black
+
+# Notes on Occlusion Maps
+
+- Occlusion maps highlight **regions**, not individual pixels
+- The outlined box represents the area that causes the **largest drop in model confidence**
+- Fixed patch mode is faster and easier to debug
+- Auto patch mode produces clearer and more interpretable results

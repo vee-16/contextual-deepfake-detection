@@ -491,6 +491,250 @@ def save_saliency_maps(model, loader, run_dir, num_samples=5):
 
     print(f"Saved {saved_count} saliency map(s) to: {saliency_dir}")
 
+# --------------------------
+# Occlusion map
+# --------------------------
+
+def generate_occlusion_map_fixed(model, image_tensor, patch_size=32, stride=16, target_class=None):
+    """
+    Generate an occlusion map for a single image tensor using a fixed patch size.
+    Also returns the highest-impact occlusion box.
+    """
+    model.eval()
+
+    input_tensor = image_tensor.unsqueeze(0).to(device)
+
+    with torch.no_grad():
+        output = model(input_tensor)
+        predicted_class = output.argmax(dim=1).item()
+
+        if target_class is None:
+            target_class = predicted_class
+
+        probs = torch.softmax(output, dim=1)[0].cpu().numpy()
+        base_score = probs[target_class]
+
+    _, _, height, width = input_tensor.shape
+    occlusion_map = np.zeros((height, width), dtype=np.float32)
+
+    best_score_drop = -float("inf")
+    best_box = None
+
+    for top in range(0, height - patch_size + 1, stride):
+        for left in range(0, width - patch_size + 1, stride):
+            bottom = top + patch_size
+            right = left + patch_size
+
+            occluded = input_tensor.clone()
+            occluded[:, :, top:bottom, left:right] = 0.0
+
+            with torch.no_grad():
+                occluded_output = model(occluded)
+                occluded_probs = torch.softmax(occluded_output, dim=1)[0].cpu().numpy()
+                score_drop = base_score - occluded_probs[target_class]
+
+            occlusion_map[top:bottom, left:right] += score_drop
+
+            if score_drop > best_score_drop:
+                best_score_drop = score_drop
+                best_box = (left, top, right, bottom)
+
+    occlusion_map -= occlusion_map.min()
+    if occlusion_map.max() > 0:
+        occlusion_map /= occlusion_map.max()
+
+    return occlusion_map, predicted_class, probs, best_box
+
+def generate_occlusion_map_auto(model, image_tensor, patch_sizes=(16, 24, 32, 48), target_class=None):
+    """
+    Generate an occlusion map and automatically choose the patch size.
+    Also returns the highest-impact occlusion box.
+    """
+    best_map = None
+    best_patch_size = None
+    best_score = -1.0
+    best_predicted_class = None
+    best_probs = None
+    best_box = None
+
+    for patch_size in patch_sizes:
+        stride = max(8, patch_size // 2)
+
+        occlusion_map, predicted_class, probs, box = generate_occlusion_map_fixed(
+            model,
+            image_tensor,
+            patch_size=patch_size,
+            stride=stride,
+            target_class=target_class
+        )
+
+        mean_value = occlusion_map.mean()
+        max_value = occlusion_map.max()
+
+        if mean_value > 0:
+            score = max_value / mean_value
+        else:
+            score = 0.0
+
+        if score > best_score:
+            best_score = score
+            best_map = occlusion_map
+            best_patch_size = patch_size
+            best_predicted_class = predicted_class
+            best_probs = probs
+            best_box = box
+
+    return best_map, best_predicted_class, best_probs, best_patch_size, best_box
+
+def save_occlusion_box_overlay(image_tensor,
+                               best_box,
+                               save_path,
+                               true_label=None,
+                               predicted_class=None,
+                               probs=None,
+                               box_color="black"):
+    """
+    Save the original image with the most important occlusion box outlined.
+    """
+    class_names = {0: "real", 1: "fake"}
+
+    image = image_tensor.detach().cpu().clone()
+    image = image.permute(1, 2, 0).numpy()
+    image = (image * 0.5) + 0.5
+    image = np.clip(image, 0, 1)
+
+    plt.figure(figsize=(5, 5))
+    plt.imshow(image)
+
+    if best_box is not None:
+        left, top, right, bottom = best_box
+        width = right - left
+        height = bottom - top
+
+        rect = plt.Rectangle(
+            (left, top),
+            width,
+            height,
+            fill=False,
+            edgecolor=box_color,
+            linewidth=2
+            )
+        plt.gca().add_patch(rect)
+
+    title_parts = []
+    if true_label is not None:
+        title_parts.append(f"True: {class_names[true_label]}")
+    if predicted_class is not None:
+        title_parts.append(f"Pred: {class_names[predicted_class]}")
+    if probs is not None:
+        title_parts.append(f"P(real)={probs[0]:.4f}, P(fake)={probs[1]:.4f}")
+
+    plt.title("\n".join(title_parts))
+    plt.axis("off")
+    plt.tight_layout()
+    plt.savefig(save_path, bbox_inches="tight")
+    plt.close()
+
+def save_occlusion_maps(
+    model,
+    loader,
+    run_dir,
+    num_samples=5,
+    use_auto_patch_size=False,
+    patch_size=32,
+    stride=16,
+    box_color="black"
+):
+    """
+    Save occlusion map visualizations and best-box overlays for a few samples.
+    """
+    occlusion_dir = os.path.join(run_dir, "occlusion_maps")
+    occlusion_box_dir = os.path.join(run_dir, "occlusion_boxes")
+
+    os.makedirs(occlusion_dir, exist_ok=True)
+    os.makedirs(occlusion_box_dir, exist_ok=True)
+
+    class_names = {0: "real", 1: "fake"}
+
+    saved_count = 0
+    sample_index = 0
+
+    for images, labels in loader:
+        for i in range(images.size(0)):
+            if saved_count >= num_samples:
+                print(f"Saved {saved_count} occlusion map(s) to: {occlusion_dir}")
+                print(f"Saved {saved_count} occlusion box image(s) to: {occlusion_box_dir}")
+                return
+
+            image_tensor = images[i].cpu()
+            true_label = labels[i].item()
+
+            if use_auto_patch_size:
+                occlusion_map, predicted_class, probs, used_patch_size, best_box = generate_occlusion_map_auto(
+                    model,
+                    image_tensor
+                )
+            else:
+                occlusion_map, predicted_class, probs, best_box = generate_occlusion_map_fixed(
+                    model,
+                    image_tensor,
+                    patch_size=patch_size,
+                    stride=stride
+                )
+                used_patch_size = patch_size
+
+            image = image_tensor.detach().cpu().clone()
+            image = image.permute(1, 2, 0).numpy()
+            image = (image * 0.5) + 0.5
+            image = np.clip(image, 0, 1)
+
+            plt.figure(figsize=(10, 4))
+
+            plt.subplot(1, 2, 1)
+            plt.imshow(image)
+            plt.title(
+                f"Original Image\nTrue: {class_names[true_label]} | Pred: {class_names[predicted_class]}"
+            )
+            plt.axis("off")
+
+            plt.subplot(1, 2, 2)
+            plt.imshow(occlusion_map, cmap="hot")
+            plt.title(
+                f"Occlusion Map\nPatch={used_patch_size} | P(real)={probs[0]:.4f}, P(fake)={probs[1]:.4f}"
+            )
+            plt.axis("off")
+
+            plt.tight_layout()
+
+            base_filename = (
+                f"sample_{sample_index}_true_{class_names[true_label]}"
+                f"_pred_{class_names[predicted_class]}"
+            )
+
+            map_save_path = os.path.join(occlusion_dir, f"{base_filename}.png")
+            plt.savefig(map_save_path, bbox_inches="tight")
+            plt.close()
+
+            print(f"Saved occlusion map: {map_save_path}")
+
+            box_save_path = os.path.join(occlusion_box_dir, f"{base_filename}_box.png")
+            save_occlusion_box_overlay(
+                image_tensor=image_tensor,
+                best_box=best_box,
+                save_path=box_save_path,
+                true_label=true_label,
+                predicted_class=predicted_class,
+                probs=probs,
+                box_color=box_color
+            )
+
+            print(f"Saved occlusion box image: {box_save_path}")
+
+            saved_count += 1
+            sample_index += 1
+
+    print(f"Saved {saved_count} occlusion map(s) to: {occlusion_dir}")
+    print(f"Saved {saved_count} occlusion box image(s) to: {occlusion_box_dir}")
 
 # --------------------------
 # Main
@@ -505,6 +749,11 @@ def main():
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--load_model", type=str, default=None)
     parser.add_argument("--num_saliency", type=int, default=5)
+    parser.add_argument("--num_occlusion", type=int, default=5)
+    parser.add_argument("--occlusion_patch", type=int, default=32)
+    parser.add_argument("--occlusion_stride", type=int, default=16)
+    parser.add_argument("--use_auto_patch_size", action="store_true")
+    parser.add_argument("--occlusion_box_color", type=str, default="black")
 
     args = parser.parse_args()
 
@@ -672,6 +921,17 @@ def main():
 
     #demo_saliency_on_sample(model, test_loader, sample_index=0)
     save_saliency_maps(model, test_loader, run_dir, num_samples=args.num_saliency)
+
+    save_occlusion_maps(
+        model,
+        test_loader,
+        run_dir,
+        num_samples=args.num_occlusion,
+        use_auto_patch_size=args.use_auto_patch_size,
+        patch_size=args.occlusion_patch,
+        stride=args.occlusion_stride,
+        box_color=args.occlusion_box_color
+    )
 
 if __name__ == "__main__":
     main()
