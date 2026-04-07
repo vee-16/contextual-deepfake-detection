@@ -30,9 +30,13 @@ def evaluate_run(run_dir: str) -> None:
     run_dir = os.path.abspath(run_dir)
     print(f"Evaluating run at: {run_dir}")
 
-    path_y_true = os.path.join(run_dir, "test_y_true.npy")
-    path_y_pred = os.path.join(run_dir, "test_y_pred.npy")
-    path_y_prob = os.path.join(run_dir, "test_y_prob.npy")
+    # --------------------------
+    # Load predictions
+    # --------------------------
+    pred_dir = os.path.join(run_dir, "predictions")
+    path_y_true = os.path.join(pred_dir, "test_y_true.npy")
+    path_y_pred = os.path.join(pred_dir, "test_y_pred.npy")
+    path_y_prob = os.path.join(pred_dir, "test_y_prob.npy")
 
     if not os.path.isfile(path_y_true):
         raise FileNotFoundError(
@@ -51,23 +55,29 @@ def evaluate_run(run_dir: str) -> None:
     if y_true.shape != y_pred.shape:
         raise ValueError(f"Shape mismatch: y_true {y_true.shape}, y_pred {y_pred.shape}")
 
-    # Optional probabilities for ROC-AUC
+    # --------------------------
+    # Handle probabilities
+    # --------------------------
     has_probs = os.path.isfile(path_y_prob)
     if has_probs:
         y_prob = np.load(path_y_prob)
-        if y_true.shape != y_prob.shape:
-            raise ValueError(f"Shape mismatch: y_true {y_true.shape}, y_prob {y_prob.shape}")
+
+        # If shape is [N,2], take fake class
+        if y_prob.ndim > 1:
+            y_prob = y_prob[:, 1]
     else:
         y_prob = None
         print("Note: test_y_prob.npy not found; ROC-AUC will be skipped.")
 
-    # Core metrics
+    # --------------------------
+    # Metrics
+    # --------------------------
     acc = accuracy_score(y_true, y_pred)
     prec = precision_score(y_true, y_pred, zero_division=0)
     rec = recall_score(y_true, y_pred, zero_division=0)
     f1 = f1_score(y_true, y_pred, zero_division=0)
 
-    if has_probs:
+    if y_prob is not None:
         try:
             roc = roc_auc_score(y_true, y_prob)
         except ValueError:
@@ -78,19 +88,21 @@ def evaluate_run(run_dir: str) -> None:
 
     cm = confusion_matrix(y_true, y_pred)
 
+    # --------------------------
+    # Print results
+    # --------------------------
     print("\n=== Evaluation Metrics ===")
     print(f"Accuracy : {acc:.4f}")
     print(f"Precision: {prec:.4f}")
     print(f"Recall   : {rec:.4f}")
     print(f"F1-score : {f1:.4f}")
-    if has_probs:
-        print(f"ROC-AUC  : {roc:.4f}")
-    else:
-        print("ROC-AUC  : skipped (no probabilities file)")
+    print(f"ROC-AUC  : {roc:.4f}")
     print("\nConfusion Matrix (rows=true, cols=pred):")
     print(cm)
 
-    # Save metrics to CSV for reports / later comparison
+    # --------------------------
+    # Save CSV
+    # --------------------------
     metrics_csv = os.path.join(run_dir, "detailed_metrics.csv")
     header = (
         "accuracy,precision,recall,f1_score,roc_auc,"
@@ -112,7 +124,7 @@ def evaluate_run(run_dir: str) -> None:
     )
 
     file_exists = os.path.isfile(metrics_csv)
-    with open(metrics_csv, "a", encoding="utf-8") as f:
+    with open(metrics_csv, "w", encoding="utf-8") as f:
         if not file_exists:
             f.write(header)
         f.write(row)

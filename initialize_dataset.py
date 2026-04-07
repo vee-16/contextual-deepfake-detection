@@ -16,8 +16,11 @@ DATA_PATH = Path("data/openfake")
 def create_subset(sample_size: int):
     dataset = load_dataset("ComplexDataLab/OpenFake", streaming=True)
 
-    train_samples = list(dataset["train"].take(sample_size))
-    test_samples = list(dataset["test"].take(sample_size))
+    train_stream = dataset["train"].shuffle(seed=42, buffer_size=1000)
+    test_stream = dataset["test"].shuffle(seed=42, buffer_size=1000)
+
+    train_samples = list(train_stream.take(sample_size))
+    test_samples = list(test_stream.take(sample_size))
 
     train_ds = Dataset.from_list(train_samples)
     test_ds = Dataset.from_list(test_samples)
