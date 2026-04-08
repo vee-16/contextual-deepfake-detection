@@ -314,6 +314,17 @@ python Contextual_Deepfake_Detector.py
 
 # Example Commands
 
-python Contextual_Deepfake_Detector.py --epochs 5 --batch_size 32 --lr 0.0001 --num_saliency 5
-python Contextual_Deepfake_Detector.py --load_model results/<run_name>/best_model.pth --num_saliency 10
+**Training**
+`python Contextual_Deepfake_Detector.py --epochs 5 --batch_size 32 --lr 0.0001`
 
+**Saliency Maps (custom number)**
+`python Contextual_Deepfake_Detector.py --load_model results/<run_name>/best_model.pth --num_saliency 10`
+
+**Occlusion maps (fixed patch)**
+`python Contextual_Deepfake_Detector.py --load_model results/<run_name>/best_model.pth --num_occlusion 5 --occlusion_patch 32 --occlusion_stride 16 --occlusion_box_color black`
+
+**Occlusion maps (auto patch selection)**
+`python Contextual_Deepfake_Detector.py --load_model results/<run_name>/best_model.pth --num_occlusion 5 --use_auto_patch_size --occlusion_box_color black`
+
+**Full training and Visualization**
+`python Contextual_Deepfake_Detector.py --epochs 5 --batch_size 32 --lr 0.0001 --num_saliency 5 --num_occlusion 5 --use_auto_patch_size`

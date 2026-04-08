@@ -1,5 +1,4 @@
 import os
-import csv
 import time
 import torch
 import torch.nn as nn
@@ -9,7 +8,6 @@ import argparse
 import subprocess
 import random
 
-from torchvision import transforms
 from torchvision.models import vit_b_16, ViT_B_16_Weights
 from torch.utils.data import random_split, DataLoader, Dataset
 from datasets import load_from_disk
@@ -46,15 +44,19 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # --------------------------
 # Transforms
 # --------------------------
-# Standard ViT preprocessing: resize to 224x224, convert to tensor, and normalize
-transform = transforms.Compose([
-    transforms.Resize((224, 224)),
-    transforms.ToTensor(),
-    transforms.Normalize(
-        mean=[0.5, 0.5, 0.5],
-        std=[0.5, 0.5, 0.5]
-    )
-])
+weights = ViT_B_16_Weights.DEFAULT
+DISPLAY_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+DISPLAY_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+
+# Use the pretrained ViT weights' expected preprocessing pipeline.
+transform = weights.transforms()
+
+
+def denormalize_image(image_tensor):
+    image = image_tensor.detach().cpu().clone()
+    image = image.permute(1, 2, 0).numpy()
+    image = (image * DISPLAY_STD) + DISPLAY_MEAN
+    return np.clip(image, 0, 1)
 
 
 # --------------------------
@@ -143,9 +145,11 @@ def build_dataloaders():
 
     # Dataloaders handle batching and shuffling
     use_pin_memory = (device.type == "cuda")
-    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=8, pin_memory=use_pin_memory)
-    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=8, pin_memory=use_pin_memory)
-    test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=8, pin_memory=use_pin_memory)
+    num_workers = min(4, os.cpu_count() or 1)
+
+    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=num_workers, pin_memory=use_pin_memory)
+    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=num_workers, pin_memory=use_pin_memory)
+    test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=num_workers, pin_memory=use_pin_memory)
 
     print("\nAfter split:")
     print("Train samples:", len(train_dataset))
@@ -160,7 +164,6 @@ def build_dataloaders():
 # --------------------------
 # Load pretrained Vision Transformer and adapt it for binary classification
 def build_model():
-    weights = ViT_B_16_Weights.DEFAULT
     model = vit_b_16(weights=weights)
 
     # Replace classification head for binary classification
@@ -367,12 +370,7 @@ def show_saliency_map(image_tensor, saliency_map, true_label=None, predicted_cla
         class_names = {0: "real", 1: "fake"}
 
     # Undo normalization for display
-    image = image_tensor.detach().cpu().clone()
-    image = image.permute(1, 2, 0).numpy()  # [H, W, C]
-
-    # Your transform used mean=0.5, std=0.5
-    image = (image * 0.5) + 0.5
-    image = np.clip(image, 0, 1)
+    image = denormalize_image(image_tensor)
 
     title_parts = []
     if true_label is not None:
@@ -434,6 +432,7 @@ def save_saliency_maps(model, loader, run_dir, num_samples=5, selected_indices=N
     os.makedirs(saliency_dir, exist_ok=True)
 
     dataset_size = len(loader.dataset)
+    num_samples = min(num_samples, dataset_size)
     if selected_indices is None:
         selected_indices = random.sample(range(dataset_size), num_samples)
 
@@ -447,10 +446,7 @@ def save_saliency_maps(model, loader, run_dir, num_samples=5, selected_indices=N
 
         saliency_map, predicted_class, probs = generate_saliency_map(model, image_tensor)
 
-        image = image_tensor.detach().cpu().clone()
-        image = image.permute(1, 2, 0).numpy()
-        image = (image * 0.5) + 0.5
-        image = np.clip(image, 0, 1)
+        image = denormalize_image(image_tensor)
 
         plt.figure(figsize=(10, 4))
 
@@ -587,10 +583,7 @@ def save_occlusion_box_overlay(image_tensor,
     """
     class_names = {0: "real", 1: "fake"}
 
-    image = image_tensor.detach().cpu().clone()
-    image = image.permute(1, 2, 0).numpy()
-    image = (image * 0.5) + 0.5
-    image = np.clip(image, 0, 1)
+    image = denormalize_image(image_tensor)
 
     plt.figure(figsize=(5, 5))
     plt.imshow(image)
@@ -656,6 +649,7 @@ def save_occlusion_maps(
     os.makedirs(occlusion_box_dir, exist_ok=True)
 
     dataset_size = len(loader.dataset)
+    num_samples = min(num_samples, dataset_size)
     if selected_indices is None:
         selected_indices = random.sample(range(dataset_size), num_samples)
 
@@ -682,10 +676,7 @@ def save_occlusion_maps(
             used_patch_size = patch_size
 
         # Undo normalization for display
-        image = image_tensor.detach().cpu().clone()
-        image = image.permute(1, 2, 0).numpy()
-        image = (image * 0.5) + 0.5
-        image = np.clip(image, 0, 1)
+        image = denormalize_image(image_tensor)
 
         # --------- Save occlusion heatmap ---------
         plt.figure(figsize=(10, 4))
@@ -788,18 +779,13 @@ def main():
     # dataloaders handle batching, shuffling, and parallel loading
     train_loader, val_loader, test_loader = build_dataloaders()
 
-    # Get dataset sizes for logging later
-    train_size = len(train_loader.dataset)
-    val_size = len(val_loader.dataset)
-    test_size = len(test_loader.dataset)
-
     # --------------------------
     # Model
     # --------------------------
     # Build the model (Vision Transformer)
     model = build_model()
     training_time = None
-    best_val_acc = 0.0
+    best_val_acc = float("-inf")
     best_model_path = os.path.join(run_dir, "best_model.pth")
 
     # --------------------------
@@ -858,6 +844,10 @@ def main():
 
         # IMPORTANT: Load BEST model before evaluation
         print("Loading best model for final evaluation...")
+        if not os.path.exists(best_model_path):
+            raise FileNotFoundError(
+                f"Best model checkpoint was not created: {best_model_path}"
+            )
         model.load_state_dict(torch.load(best_model_path, map_location=device))
         model.eval()
 
@@ -881,7 +871,10 @@ def main():
     # SALIENCY
     # --------------------------
 
-    shared_num_samples = max(args.num_saliency, args.num_occlusion)
+    shared_num_samples = min(
+        len(test_loader.dataset),
+        max(args.num_saliency, args.num_occlusion)
+    )
     shared_indices = random.sample(range(len(test_loader.dataset)), shared_num_samples)
 
     save_saliency_maps(
@@ -908,9 +901,9 @@ def main():
     # FINAL EVALUATION
     # --------------------------
     subprocess.run([
-    "python", "evaluate_run.py",
-    "--run_dir", run_dir
-])
+        "python", "evaluate_run.py",
+        "--run_dir", run_dir
+    ], check=True)
 
 
 if __name__ == "__main__":
