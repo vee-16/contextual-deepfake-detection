@@ -16,23 +16,36 @@ evaluate_run.py                   # evaluation for a run
 check_gpu.py                      # GPU usage verification
 requirements.txt
 
+```
 data/
-    openfake/
-        train/
-            chunk_*/
-        test/
-            chunk_*/
-
+└── openfake/
+    ├── train/
+    │   ├── chunk_5000/
+    │   ├── chunk_10000/
+    │   └── ...
+    └── test/
+        ├── chunk_5000/
+        └── ...
+```
 Each chunk contains ~5000 samples.  
 This design prevents out-of-memory errors when working with large datasets.
-
+```
 results/
-    run_name/
-        predictions/
-        saliency_maps/
-        best_model.pth
-        detailed_metrics.csv
-
+└── vit_e5_bs32_lr0p0001_20260420_180416/
+    ├── metrics.csv
+    ├── predictions/
+    │   ├── test_y_true.npy
+    │   ├── test_y_pred.npy
+    │   └── test_y_prob.npy
+    ├── saliency_maps/
+    │   ├── sample_1.png
+    │   └── ...
+    ├── occlusion_maps/
+    │   ├── sample_1.png
+    │   └── ...
+    └── model/
+        └── checkpoint_epoch_5.pth
+```
 ---------------------------------------------------------------------------------------------
 ---------------------------------------------------------------------------------------------   
 # Training Pipeline
@@ -77,10 +90,10 @@ cd contextual-deepfake-detection
 3. Request compute node
 
 ### Dataset Download (CPU node)
-srun --cluster=chip-cpu --partition=general --mem=64G --time=05:00:00 --pty bash
+`srun --cluster=chip-cpu --partition=general --mem=64G --time=05:00:00 --pty bash`
 
 ### Training (GPU node)
-srun --cluster=chip-gpu --partition=gpu --gres=gpu:1 --mem=32G --time=05:00:00 --pty bash
+`srun --cluster=chip-gpu --partition=gpu --gres=gpu:1 --mem=32G --time=05:00:00 --pty bash`
 
 - CPU nodes are recommended for dataset downloading. GPU nodes should be used for training.
 
@@ -188,7 +201,7 @@ Basic run:
 `python Contextual_Deepfake_Detector.py`
 
 Custom run:
-`python Contextual_Deepfake_Detector.py --epochs 10 --batch_size 32 --lr 0.0001 --num_saliency 10`
+`python Contextual_Deepfake_Detector.py --epochs 5 --batch_size 64 --lr 0.0001 --num_saliency 5 --num_occlusion 5`
 
 Arguments:
 - --epochs: Number of training epochs
