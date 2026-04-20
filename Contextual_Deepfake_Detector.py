@@ -1,5 +1,4 @@
 import os
-import csv
 import time
 import torch
 import torch.nn as nn
@@ -9,7 +8,6 @@ import argparse
 import subprocess
 import random
 
-from torchvision import transforms
 from torchvision.models import vit_b_16, ViT_B_16_Weights
 from torch.utils.data import random_split, DataLoader, Dataset
 from datasets import load_from_disk
@@ -49,15 +47,19 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # --------------------------
 # Transforms
 # --------------------------
-# Standard ViT preprocessing: resize to 224x224, convert to tensor, and normalize
-transform = transforms.Compose([
-    transforms.Resize((224, 224)),
-    transforms.ToTensor(),
-    transforms.Normalize(
-        mean=[0.5, 0.5, 0.5],
-        std=[0.5, 0.5, 0.5]
-    )
-])
+weights = ViT_B_16_Weights.DEFAULT
+DISPLAY_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+DISPLAY_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+
+# Use the pretrained ViT weights' expected preprocessing pipeline.
+transform = weights.transforms()
+
+
+def denormalize_image(image_tensor):
+    image = image_tensor.detach().cpu().clone()
+    image = image.permute(1, 2, 0).numpy()
+    image = (image * DISPLAY_STD) + DISPLAY_MEAN
+    return np.clip(image, 0, 1)
 
 
 # --------------------------
@@ -156,9 +158,11 @@ def build_dataloaders():
 
     # Dataloaders handle batching and shuffling
     use_pin_memory = (device.type == "cuda")
-    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=8, pin_memory=use_pin_memory)
-    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=8, pin_memory=use_pin_memory)
-    test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=8, pin_memory=use_pin_memory)
+    num_workers = min(4, os.cpu_count() or 1)
+
+    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=num_workers, pin_memory=use_pin_memory)
+    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=num_workers, pin_memory=use_pin_memory)
+    test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=num_workers, pin_memory=use_pin_memory)
 
     print("\nAfter split:")
     print("Train samples:", len(train_dataset))
@@ -173,7 +177,6 @@ def build_dataloaders():
 # --------------------------
 # Load pretrained Vision Transformer and adapt it for binary classification
 def build_model():
-    weights = ViT_B_16_Weights.DEFAULT
     model = vit_b_16(weights=weights)
 
     # Replace classification head for binary classification
@@ -652,12 +655,7 @@ def show_saliency_map(image_tensor, saliency_map, true_label=None, predicted_cla
         class_names = {0: "real", 1: "fake"}
 
     # Undo normalization for display
-    image = image_tensor.detach().cpu().clone()
-    image = image.permute(1, 2, 0).numpy()  # [H, W, C]
-
-    # Your transform used mean=0.5, std=0.5
-    image = (image * 0.5) + 0.5
-    image = np.clip(image, 0, 1)
+    image = denormalize_image(image_tensor)
 
     title_parts = []
     if true_label is not None:
@@ -704,7 +702,7 @@ def demo_saliency_on_sample(model, loader, sample_index=0):
         class_names={0: "real", 1: "fake"}
     )
 
-def save_saliency_maps(model, loader, run_dir, num_samples=5):
+def save_saliency_maps(model, loader, run_dir, num_samples=5, selected_indices=None):
     """
     Save saliency map visualizations for a few samples from the dataloader.
 
@@ -713,13 +711,15 @@ def save_saliency_maps(model, loader, run_dir, num_samples=5):
         loader: dataloader to draw samples from
         run_dir: directory where images should be saved
         num_samples: number of saliency figures to save
+        selected_indices: optional list of dataset indices to use
     """
     saliency_dir = os.path.join(run_dir, "saliency_maps")
     os.makedirs(saliency_dir, exist_ok=True)
 
-    # Get random indices from dataset
     dataset_size = len(loader.dataset)
-    selected_indices = random.sample(range(dataset_size), num_samples)
+    num_samples = min(num_samples, dataset_size)
+    if selected_indices is None:
+        selected_indices = random.sample(range(dataset_size), num_samples)
 
     class_names = {0: "real", 1: "fake"}
 
@@ -731,11 +731,7 @@ def save_saliency_maps(model, loader, run_dir, num_samples=5):
 
         saliency_map, predicted_class, probs = generate_saliency_map(model, image_tensor)
 
-        # Undo normalization for display
-        image = image_tensor.detach().cpu().clone()
-        image = image.permute(1, 2, 0).numpy()
-        image = (image * 0.5) + 0.5
-        image = np.clip(image, 0, 1)
+        image = denormalize_image(image_tensor)
 
         plt.figure(figsize=(10, 4))
 
@@ -763,8 +759,256 @@ def save_saliency_maps(model, loader, run_dir, num_samples=5):
 
         print(f"Saved saliency map: {save_path}")
 
-    print(f"Saved {num_samples} saliency map(s) to: {saliency_dir}")
+    print(f"Saved {len(selected_indices)} saliency map(s) to: {saliency_dir}")
 
+# --------------------------
+# Occlusion map
+# --------------------------
+
+def generate_occlusion_map_fixed(model, image_tensor, patch_size=32, stride=16, target_class=None):
+    """
+    Generate an occlusion map for a single image tensor using a fixed patch size.
+    Also returns the highest-impact occlusion box.
+    """
+    model.eval()
+
+    input_tensor = image_tensor.unsqueeze(0).to(device)
+
+    with torch.no_grad():
+        output = model(input_tensor)
+        predicted_class = output.argmax(dim=1).item()
+
+        if target_class is None:
+            target_class = predicted_class
+
+        probs = torch.softmax(output, dim=1)[0].cpu().numpy()
+        base_score = probs[target_class]
+
+    _, _, height, width = input_tensor.shape
+    occlusion_map = np.zeros((height, width), dtype=np.float32)
+
+    best_score_drop = -float("inf")
+    best_box = None
+
+    for top in range(0, height - patch_size + 1, stride):
+        for left in range(0, width - patch_size + 1, stride):
+            bottom = top + patch_size
+            right = left + patch_size
+
+            occluded = input_tensor.clone()
+            occluded[:, :, top:bottom, left:right] = 0.0
+
+            with torch.no_grad():
+                occluded_output = model(occluded)
+                occluded_probs = torch.softmax(occluded_output, dim=1)[0].cpu().numpy()
+                score_drop = base_score - occluded_probs[target_class]
+
+            occlusion_map[top:bottom, left:right] += score_drop
+
+            if score_drop > best_score_drop:
+                best_score_drop = score_drop
+                best_box = (left, top, right, bottom)
+
+    occlusion_map -= occlusion_map.min()
+    if occlusion_map.max() > 0:
+        occlusion_map /= occlusion_map.max()
+
+    return occlusion_map, predicted_class, probs, best_box
+
+def generate_occlusion_map_auto(model, image_tensor, patch_sizes=(16, 24, 32, 48), target_class=None):
+    """
+    Generate an occlusion map and automatically choose the patch size.
+    Also returns the highest-impact occlusion box.
+    """
+    best_map = None
+    best_patch_size = None
+    best_score = -1.0
+    best_predicted_class = None
+    best_probs = None
+    best_box = None
+
+    for patch_size in patch_sizes:
+        stride = max(8, patch_size // 2)
+
+        occlusion_map, predicted_class, probs, box = generate_occlusion_map_fixed(
+            model,
+            image_tensor,
+            patch_size=patch_size,
+            stride=stride,
+            target_class=target_class
+        )
+
+        mean_value = occlusion_map.mean()
+        max_value = occlusion_map.max()
+
+        if mean_value > 0:
+            score = max_value / mean_value
+        else:
+            score = 0.0
+
+        if score > best_score:
+            best_score = score
+            best_map = occlusion_map
+            best_patch_size = patch_size
+            best_predicted_class = predicted_class
+            best_probs = probs
+            best_box = box
+
+    return best_map, best_predicted_class, best_probs, best_patch_size, best_box
+
+def save_occlusion_box_overlay(image_tensor,
+                               best_box,
+                               save_path,
+                               true_label=None,
+                               predicted_class=None,
+                               probs=None,
+                               box_color="black"):
+    """
+    Save the original image with the most important occlusion box outlined.
+    """
+    class_names = {0: "real", 1: "fake"}
+
+    image = denormalize_image(image_tensor)
+
+    plt.figure(figsize=(5, 5))
+    plt.imshow(image)
+
+    if best_box is not None:
+        left, top, right, bottom = best_box
+        width = right - left
+        height = bottom - top
+
+        rect = plt.Rectangle(
+            (left, top),
+            width,
+            height,
+            fill=False,
+            edgecolor=box_color,
+            linewidth=2
+            )
+        plt.gca().add_patch(rect)
+
+    title_parts = []
+    if true_label is not None:
+        title_parts.append(f"True: {class_names[true_label]}")
+    if predicted_class is not None:
+        title_parts.append(f"Pred: {class_names[predicted_class]}")
+    if probs is not None:
+        title_parts.append(f"P(real)={probs[0]:.4f}, P(fake)={probs[1]:.4f}")
+
+    plt.title("\n".join(title_parts))
+    plt.axis("off")
+    plt.tight_layout()
+    plt.savefig(save_path, bbox_inches="tight")
+    plt.close()
+
+def save_occlusion_maps(
+    model,
+    loader,
+    run_dir,
+    num_samples=5,
+    use_auto_patch_size=False,
+    patch_size=32,
+    stride=16,
+    box_color="black",
+    selected_indices=None
+):
+    """
+    Save occlusion map visualizations and best-box overlays for a few samples.
+
+    Args:
+        model: trained or loaded model
+        loader: dataloader to draw samples from
+        run_dir: directory where images should be saved
+        num_samples: number of occlusion figures to save
+        use_auto_patch_size: whether to automatically choose patch size
+        patch_size: fixed patch size if auto mode is off
+        stride: stride for fixed patch mode
+        box_color: color of the bounding box
+        selected_indices: optional list of dataset indices to use
+    """
+    occlusion_dir = os.path.join(run_dir, "occlusion_maps")
+    occlusion_box_dir = os.path.join(run_dir, "occlusion_boxes")
+
+    os.makedirs(occlusion_dir, exist_ok=True)
+    os.makedirs(occlusion_box_dir, exist_ok=True)
+
+    dataset_size = len(loader.dataset)
+    num_samples = min(num_samples, dataset_size)
+    if selected_indices is None:
+        selected_indices = random.sample(range(dataset_size), num_samples)
+
+    class_names = {0: "real", 1: "fake"}
+
+    model.eval()
+
+    for idx in selected_indices:
+        image_tensor, true_label = loader.dataset[idx]
+        image_tensor = image_tensor.cpu()
+
+        if use_auto_patch_size:
+            occlusion_map, predicted_class, probs, used_patch_size, best_box = generate_occlusion_map_auto(
+                model,
+                image_tensor
+            )
+        else:
+            occlusion_map, predicted_class, probs, best_box = generate_occlusion_map_fixed(
+                model,
+                image_tensor,
+                patch_size=patch_size,
+                stride=stride
+            )
+            used_patch_size = patch_size
+
+        # Undo normalization for display
+        image = denormalize_image(image_tensor)
+
+        # --------- Save occlusion heatmap ---------
+        plt.figure(figsize=(10, 4))
+
+        plt.subplot(1, 2, 1)
+        plt.imshow(image)
+        plt.title(
+            f"Original Image\nTrue: {class_names[true_label]} | Pred: {class_names[predicted_class]}"
+        )
+        plt.axis("off")
+
+        plt.subplot(1, 2, 2)
+        plt.imshow(occlusion_map, cmap="hot")
+        plt.title(
+            f"Occlusion Map\nPatch={used_patch_size} | P(real)={probs[0]:.4f}, P(fake)={probs[1]:.4f}"
+        )
+        plt.axis("off")
+
+        plt.tight_layout()
+
+        base_filename = (
+            f"sample_{idx}_true_{class_names[true_label]}"
+            f"_pred_{class_names[predicted_class]}"
+        )
+
+        map_save_path = os.path.join(occlusion_dir, f"{base_filename}.png")
+        plt.savefig(map_save_path, bbox_inches="tight")
+        plt.close()
+
+        print(f"Saved occlusion map: {map_save_path}")
+
+        # --------- Save box overlay ---------
+        box_save_path = os.path.join(occlusion_box_dir, f"{base_filename}_box.png")
+        save_occlusion_box_overlay(
+            image_tensor=image_tensor,
+            best_box=best_box,
+            save_path=box_save_path,
+            true_label=true_label,
+            predicted_class=predicted_class,
+            probs=probs,
+            box_color=box_color
+        )
+
+        print(f"Saved occlusion box image: {box_save_path}")
+
+    print(f"Saved {len(selected_indices)} occlusion map(s) to: {occlusion_dir}")
+    print(f"Saved {len(selected_indices)} occlusion box image(s) to: {occlusion_box_dir}")
 
 # --------------------------
 # Main
@@ -779,6 +1023,11 @@ def main():
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--load_model", type=str, default=None)
     parser.add_argument("--num_saliency", type=int, default=5)
+    parser.add_argument("--num_occlusion", type=int, default=5)
+    parser.add_argument("--occlusion_patch", type=int, default=32)
+    parser.add_argument("--occlusion_stride", type=int, default=16)
+    parser.add_argument("--use_auto_patch_size", action="store_true")
+    parser.add_argument("--occlusion_box_color", type=str, default="black")
 
     args = parser.parse_args()
 
@@ -815,18 +1064,13 @@ def main():
     # dataloaders handle batching, shuffling, and parallel loading
     train_loader, val_loader, test_loader = build_dataloaders()
 
-    # Get dataset sizes for logging later
-    train_size = len(train_loader.dataset)
-    val_size = len(val_loader.dataset)
-    test_size = len(test_loader.dataset)
-
     # --------------------------
     # Model
     # --------------------------
     # Build the model (Vision Transformer)
     model = build_model()
     training_time = None
-    best_val_acc = 0.0
+    best_val_acc = float("-inf")
     best_model_path = os.path.join(run_dir, "best_model.pth")
 
     # --------------------------
@@ -885,6 +1129,10 @@ def main():
 
         # IMPORTANT: Load BEST model before evaluation
         print("Loading best model for final evaluation...")
+        if not os.path.exists(best_model_path):
+            raise FileNotFoundError(
+                f"Best model checkpoint was not created: {best_model_path}"
+            )
         model.load_state_dict(torch.load(best_model_path, map_location=device))
         model.eval()
 
@@ -922,16 +1170,41 @@ def main():
     # --------------------------
     # SALIENCY
     # --------------------------
-    #demo_saliency_on_sample(model, test_loader, sample_index=0)
-    save_saliency_maps(model, test_loader, run_dir, num_samples=args.num_saliency)
+
+    shared_num_samples = min(
+        len(test_loader.dataset),
+        max(args.num_saliency, args.num_occlusion)
+    )
+    shared_indices = random.sample(range(len(test_loader.dataset)), shared_num_samples)
+
+    save_saliency_maps(
+    model,
+    test_loader,
+    run_dir,
+    num_samples=args.num_saliency,
+    selected_indices=shared_indices[:args.num_saliency]
+    )
+
+    save_occlusion_maps(
+        model,
+        test_loader,
+        run_dir,
+        num_samples=args.num_occlusion,
+        use_auto_patch_size=args.use_auto_patch_size,
+        patch_size=args.occlusion_patch,
+        stride=args.occlusion_stride,
+        box_color=args.occlusion_box_color,
+        selected_indices=shared_indices[:args.num_occlusion]
+    )
 
     # --------------------------
     # FINAL EVALUATION
     # --------------------------
     subprocess.run([
-    "python", "evaluate_run.py",
-    "--run_dir", run_dir
-])
+        "python", "evaluate_run.py",
+        "--run_dir", run_dir
+    ], check=True)
+
 
 if __name__ == "__main__":
     main()
