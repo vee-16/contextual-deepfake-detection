@@ -7,6 +7,51 @@ The current baseline uses a pretrained Vision Transformer (ViT-B/16) fine-tuned 
 
 ---------------------------------------------------------------------------------------------
 ---------------------------------------------------------------------------------------------
+# Project Structure
+contextual-deepfake-detection/
+
+Contextual_Deepfake_Detector.py   # main training script
+initialize_dataset.py             # dataset download script
+evaluate_run.py                   # evaluation for a run
+check_gpu.py                      # GPU usage verification
+requirements.txt
+
+data/
+    openfake/
+        train/
+            chunk_*/
+        test/
+            chunk_*/
+
+Each chunk contains ~5000 samples.  
+This design prevents out-of-memory errors when working with large datasets.
+
+results/
+    run_name/
+        predictions/
+        saliency_maps/
+        best_model.pth
+        detailed_metrics.csv
+
+---------------------------------------------------------------------------------------------
+---------------------------------------------------------------------------------------------   
+# Training Pipeline
+
+1. Load chunked OpenFake dataset from disk
+2. Convert dataset into PyTorch dataloaders
+3. Split training data into train + validation sets
+4. Load pretrained Vision Transformer (ViT-B/16)
+5. Replace classification head for binary classification
+6. Train the model on real vs fake images
+7. Evaluate performance on validation set during training
+8. Save best model based on validation accuracy
+9. Generate predictions on the test set
+10. Run evaluation script to compute final metrics
+
+Each experiment starts from pretrained ViT weights and trains independently. Trained models are saved inside the results folder.
+
+---------------------------------------------------------------------------------------------
+---------------------------------------------------------------------------------------------
 
 # Run on UMBC HPCF (Optional)
 
@@ -29,7 +74,15 @@ git clone https://github.com/vee-16/contextual-deepfake-detection.git
 cd contextual-deepfake-detection
 ```
 
-3. Request compute node: `srun --gres=gpu:1 --mem=8G --time=01:00:00 --pty bash`
+3. Request compute node
+
+### Dataset Download (CPU node)
+srun --cluster=chip-cpu --partition=general --mem=64G --time=05:00:00 --pty bash
+
+### Training (GPU node)
+srun --cluster=chip-gpu --partition=gpu --gres=gpu:1 --mem=32G --time=05:00:00 --pty bash
+
+- CPU nodes are recommended for dataset downloading. GPU nodes should be used for training.
 
 - Jobs must be run on compute nodes, not login nodes due to storage limitations.
 
@@ -43,16 +96,25 @@ python -m venv .venv
 source .venv/bin/activate
 ```
 
-5. Redirect Cache
+5. Redirect Cache (Required for HPC)
 
 ```sh
-export HF_HOME=/umbc/class/cmsc475sp26/common/<groupname>/hf_cache
-export TORCH_HOME=/umbc/class/cmsc475sp26/common/<groupname>/torch_cache
+export HF_HOME=/umbc/class/cmsc475sp26/common/vsinha1_group/hf_cache
+export TORCH_HOME=/umbc/class/cmsc475sp26/common/vsinha1_group/torch_cache
+export MPLCONFIGDIR=/umbc/class/cmsc475sp26/common/vsinha1_group/mpl_cache
+export PIP_CACHE_DIR=/umbc/class/cmsc475sp26/common/vsinha1_group/pip_cache
 
 mkdir -p $HF_HOME
 mkdir -p $TORCH_HOME
+mkdir -p $MPLCONFIGDIR
+mkdir -p $PIP_CACHE_DIR
 
 ```
+- HF_HOME: HuggingFace cache (dataset + models)
+- TORCH_HOME: PyTorch model cache
+- MPLCONFIGDIR: Fixes matplotlib "No space left on device" errors on HPC
+- PIP_CACHE_DIR: Prevents pip install issues
+
 TODO:
 - [ ] look into tmux set up for persistent sessions
 - [ ] add instructions for ssh vscode client
@@ -88,6 +150,18 @@ Paper: Livernoche et al., *OpenFake: An Open Dataset and Platform Toward Real-Wo
 
 ---------------------------------------------------------------------------------------------
 ---------------------------------------------------------------------------------------------
+# Chunked Dataset Loading
+
+Instead of loading a single dataset file, the pipeline:
+
+- Loads each chunk individually using `load_from_disk`
+- Combines all chunks using `concatenate_datasets`
+- Treats the result as a single dataset for training
+
+This allows scaling to large datasets without memory issues.
+
+---------------------------------------------------------------------------------------------
+---------------------------------------------------------------------------------------------
 # Download dataset
 `python initialize_dataset.py --sample_size 100`
 
@@ -98,33 +172,13 @@ contextual-deepfake-detection/data/
 ```
 
 > Note: Do not upload the dataset to the repo as it is very large. It is currently ignored in `.gitignore` 
+> Note: The test split uses all available samples (~59k), while the training split is user-defined.
 
 This project explores the use of transformer-based architectures for
 binary classification of real vs. fake images. The current implementation
 uses a pretrained Vision Transformer (ViT-B/16) fine-tuned on a labeled
 dataset of real and manipulated images. Future implementations will use a
-hand crafted visual transformer. Main library is pythorch.
-
----------------------------------------------------------------------------------------------
----------------------------------------------------------------------------------------------
-# Project Structure
-contextual-deepfake-detection/
-
-Contextual_Deepfake_Detector.py   # main training script
-initialize_dataset.py             # dataset download script
-evaluate_run.py                   # evaluation for a run
-check_gpu.py                      # GPU usage verification
-requirements.txt
-
-data/
-    openfake/
-
-results/
-    run_name/
-        predictions/
-        saliency_maps/
-        best_model.pth
-        detailed_metrics.csv
+hand crafted visual transformer. Main library is PyTorch.
 
 ---------------------------------------------------------------------------------------------
 ---------------------------------------------------------------------------------------------   
@@ -142,23 +196,6 @@ Arguments:
 - --lr: Learning rate
 - --load_model: Path to a saved model or checkpoint (skips training and runs evaluation/inference)
 - --num_saliency: Number of saliency maps to generate and save
-
----------------------------------------------------------------------------------------------
----------------------------------------------------------------------------------------------   
-# Training Pipeline
-
-1. Load the OpenFake dataset from disk
-2. Convert dataset into PyTorch dataloaders
-3. Split training data into train + validation sets
-4. Load pretrained Vision Transformer (ViT-B/16)
-5. Replace classification head for binary classification
-6. Train the model on real vs fake images
-7. Evaluate performance on validation set during training
-8. Save best model based on validation accuracy
-9. Generate predictions on the test set
-10. Run evaluation script to compute final metrics
-
-Each experiment starts from pretrained ViT weights and trains independently. Trained models are saved inside the results folder.
 
 ---------------------------------------------------------------------------------------------
 ---------------------------------------------------------------------------------------------   
@@ -202,7 +239,7 @@ This ensures the best-performing model is used for evaluation and inference.
 
 This project supports loading a trained model and generating saliency maps for interpretability.
 
-Using saliency maps is our first strategem for defining what in the image is causing it 
+Using saliency maps is our first strategy for defining what in the image is causing it 
 to be labelled as fake or real
 
 ---------------------------------------------------------------------------------------------

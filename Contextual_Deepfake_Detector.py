@@ -10,7 +10,8 @@ import random
 
 from torchvision.models import vit_b_16, ViT_B_16_Weights
 from torch.utils.data import random_split, DataLoader, Dataset
-from datasets import load_from_disk
+from datasets import load_from_disk, concatenate_datasets
+from pathlib import Path
 from collections import Counter
 from sklearn.metrics import precision_score, recall_score, f1_score, confusion_matrix
 from tqdm import tqdm
@@ -19,6 +20,8 @@ import matplotlib.pyplot as plt
 
 from PIL import Image
 from io import BytesIO
+
+from initialize_dataset import load_all_chunks
 
 # --------------------------
 # Config
@@ -43,6 +46,18 @@ EPOCHS = None
 # Use GPU if available, otherwise CPU
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+
+# --------------------------
+# Load dataset from chunks
+# --------------------------
+def load_all_chunks(path):
+    chunk_paths = sorted(Path(path).glob("chunk_*"))
+
+    if not chunk_paths:
+        raise ValueError(f"No chunks found in {path}")
+
+    datasets = [load_from_disk(p) for p in chunk_paths]
+    return concatenate_datasets(datasets)
 
 # --------------------------
 # Transforms
@@ -114,10 +129,10 @@ class OpenFakeTorchDataset(Dataset):
 # --------------------------
 # Data loading
 # --------------------------
-# Loads dataset from disk and builds PyTorch dataloaders
+# Loads dataset from chunks and builds PyTorch dataloaders
 def build_dataloaders():
-    hf_train_dataset = load_from_disk(TRAIN_PATH)
-    hf_test_dataset = load_from_disk(TEST_PATH)
+    hf_train_dataset = load_all_chunks(TRAIN_PATH)
+    hf_test_dataset = load_all_chunks(TEST_PATH)
 
     # Print dataset info so we know things loaded correctly
     print("Train set size:", len(hf_train_dataset))
@@ -158,11 +173,11 @@ def build_dataloaders():
 
     # Dataloaders handle batching and shuffling
     use_pin_memory = (device.type == "cuda")
-    num_workers = min(4, os.cpu_count() or 1)
+    num_workers = 2 # Max allowed is 2 on cluster
 
-    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=num_workers, pin_memory=use_pin_memory)
-    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=num_workers, pin_memory=use_pin_memory)
-    test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=num_workers, pin_memory=use_pin_memory)
+    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=num_workers, pin_memory=use_pin_memory, persistent_workers=True)
+    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=num_workers, pin_memory=use_pin_memory, persistent_workers=True)
+    test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=num_workers, pin_memory=use_pin_memory, persistent_workers=True)
 
     print("\nAfter split:")
     print("Train samples:", len(train_dataset))
