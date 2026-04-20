@@ -1,7 +1,9 @@
-from datasets import load_dataset, Dataset, load_from_disk, Features, Value
+from datasets import load_dataset, Dataset, load_from_disk, Image as HFImage, concatenate_datasets
 from pathlib import Path
-import argparse
 
+import os
+import argparse
+import time
 
 """
 # OpenFake dataset size:
@@ -13,70 +15,89 @@ import argparse
 
 DATA_PATH = Path("data/openfake")
 
+def safe_collect(stream, sample_size, save_path, split_name="train"):
 
-def safe_take(stream, n):
-    samples = []
+    chunk_size = 5000
+    total = 0
+    chunk = []
+
+    save_path.mkdir(parents=True, exist_ok=True)
+
+    start_time = time.time()
+
     for example in stream:
-        samples.append(example)
-        if len(samples) == n:
-            break
-    return samples
+        chunk.append(example)
+        total += 1
 
+        # progress
+        if total % 1000 == 0:
+            progress = (total / sample_size) * 100
+            elapsed = time.time() - start_time
+            rate = total / elapsed if elapsed > 0 else 0
+
+            print(f"{split_name}: {total}/{sample_size} ({progress:.2f}%) | {rate:.1f} samples/s")
+
+        # save chunk
+        if len(chunk) >= chunk_size:
+            progress = (total / sample_size) * 100
+            print(f"{split_name}: Saving chunk at {total} ({progress:.2f}%)")
+
+            Dataset.from_list(chunk).save_to_disk(save_path / f"chunk_{total}")
+            chunk = []
+
+        if total >= sample_size:
+            break
+
+    # save remaining
+    if chunk:
+        Dataset.from_list(chunk).save_to_disk(save_path / f"chunk_{total}")
+
+    print(f"{split_name} DONE: {total}")
 
 def create_subset(sample_size: int):
-    features = Features({
-        "image": {
-            "bytes": Value("binary"),
-            "path": Value("string"),
-        },
-        "prompt": Value("string"),
-        "label": Value("string"),
-        "model": Value("string"),
-        "type": Value("string"),
-        "release_date": Value("string"),
-    })
+    dataset = load_dataset("ComplexDataLab/OpenFake", streaming=True)
 
-    dataset = load_dataset(
-        "ComplexDataLab/OpenFake",
-        streaming=True,
-        features=features
-    )
+    # prevent crash from bad images
+    dataset = dataset.cast_column("image", HFImage(decode=False))
 
-    train_stream = dataset["train"].shuffle(seed=42, buffer_size=5000)
-    test_stream = dataset["test"].shuffle(seed=42, buffer_size=5000)
+    train_stream = dataset["train"].shuffle(seed=42, buffer_size=10000)
+    test_stream = dataset["test"].shuffle(seed=42, buffer_size=10000)
 
-    train_samples = safe_take(train_stream, sample_size)
-    test_samples = safe_take(test_stream, sample_size)
+    train_path = DATA_PATH / "train"
+    test_path = DATA_PATH / "test"
 
-    train_ds = Dataset.from_list(train_samples)
-    test_ds = Dataset.from_list(test_samples)
+    safe_collect(train_stream, sample_size, train_path, "train")
+    safe_collect(test_stream, sample_size, test_path, "test")
 
-    (DATA_PATH / "train").mkdir(parents=True, exist_ok=True)
-    (DATA_PATH / "test").mkdir(parents=True, exist_ok=True)
+    return load_all_chunks(train_path), load_all_chunks(test_path)
 
-    train_ds.save_to_disk(DATA_PATH / "train")
-    test_ds.save_to_disk(DATA_PATH / "test")
+def load_all_chunks(path):
+    chunk_paths = sorted(path.glob("chunk_*"))
 
-    return train_ds, test_ds
+    if not chunk_paths:
+        print(f"No chunks found in {path}")
+        return None
 
-
-def load_subset():
-    train = load_from_disk(DATA_PATH / "train")
-    test = load_from_disk(DATA_PATH / "test")
-    return train, test
-
+    datasets = [load_from_disk(p) for p in chunk_paths]
+    return concatenate_datasets(datasets)
 
 def get_dataset(sample_size: int):
-    """Load local subset if it exists and matches sample_size; otherwise create it."""
-    if (DATA_PATH / "train").exists() and (DATA_PATH / "test").exists():
-        train, test = load_subset()
-        if len(train) == sample_size and len(test) == sample_size:
+    train_path = DATA_PATH / "train"
+    test_path = DATA_PATH / "test"
+
+    # if dataset already exists, just load it
+    if train_path.exists() and test_path.exists():
+        print("Loading existing dataset...")
+        train = load_all_chunks(train_path)
+        test = load_all_chunks(test_path)
+
+        if train is not None and test is not None:
+            print(f"Loaded: {len(train)} train, {len(test)} test")
             return train, test
-        # Existing data has different size; recreate with requested size
-        print(f"Existing subset has {len(train)} train, {len(test)} test. Recreating with {sample_size} per split.")
 
+    # otherwise create fresh
+    print("Creating dataset from scratch...")
     return create_subset(sample_size)
-
 
 if __name__ == "__main__":
 
@@ -101,6 +122,3 @@ if __name__ == "__main__":
     print("Label:", sample["label"])
     print("Prompt:", sample["prompt"])
     print("Model:", sample["model"])
-
-    # Show image
-    # sample["image"].show()
