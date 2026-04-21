@@ -90,6 +90,8 @@ cd contextual-deepfake-detection
 3. Request compute node
 
 ### Dataset Download (CPU node)
+`export HF_TOKEN=HF_hf_ACSQJZsjivsGlglOpNuXDPrSLTcFfnLrfO`
+
 `srun --cluster=chip-cpu --partition=general --mem=64G --time=05:00:00 --pty bash`
 
 ### Training (GPU node)
@@ -256,7 +258,7 @@ Using saliency maps is our first strategy for defining what in the image is caus
 to be labelled as fake or real
 
 ---------------------------------------------------------------------------------------------
-
+--------------------------------------------------------------------------------------------- 
 # Running Inference (No Training)
 
 To load a trained model and skip training:
@@ -267,7 +269,7 @@ Example:
 `python Contextual_Deepfake_Detector.py --load_model results/vit_e5_bs32_lr0p0001_20260329_104307/best_model.pth`
 
 ---------------------------------------------------------------------------------------------
-
+--------------------------------------------------------------------------------------------- 
 # Generating Saliency Maps
 
 To generate and save saliency maps:
@@ -287,7 +289,7 @@ Each saved image includes:
 - Model confidence scores
 
 ---------------------------------------------------------------------------------------------
-
+--------------------------------------------------------------------------------------------- 
 # Notes on Saliency Maps
 
 - Saliency maps are computed using input gradients
@@ -296,7 +298,7 @@ Each saved image includes:
   important area(s)
 
 ---------------------------------------------------------------------------------------------
-
+--------------------------------------------------------------------------------------------- 
 # Occlusion Maps and Important Regions
 
 In addition to saliency maps, this project implements **occlusion-based interpretability**.
@@ -310,7 +312,7 @@ For each image, two outputs are generated:
 2. **Occlusion Box** (single most important region outlined on the original image)
 
 ---------------------------------------------------------------------------------------------
-
+--------------------------------------------------------------------------------------------- 
 # Generating Occlusion Maps
 
 To generate occlusion maps, use the following arguments:
@@ -332,26 +334,26 @@ Each result includes:
 - Model predictions and probabilities
 
 ---------------------------------------------------------------------------------------------
-
+--------------------------------------------------------------------------------------------- 
 # Example Commands (Occlusion)
 
 ### Fixed patch size
 Uses a constant patch size and stride (faster, more predictable):
 
-python Contextual_Deepfake_Detector.py --load_model "models/checkpoint_epoch_5.pth"
+`python Contextual_Deepfake_Detector.py --load_model "models/checkpoint_epoch_5.pth"
 --num_occlusion 5
 --occlusion_patch 32
 --occlusion_stride 16
---occlusion_box_color black
+--occlusion_box_color black`
 
 ### Auto patch size
 Automatically selects the patch size that produces the strongest signal (slower, better visualization):
 
-python Contextual_Deepfake_Detector.py
+`python Contextual_Deepfake_Detector.py
 --load_model "models/checkpoint_epoch_5.pth"
 --num_occlusion 5
 --use_auto_patch_size
---occlusion_box_color black
+--occlusion_box_color black`
 
 # Notes on Occlusion Maps
 
@@ -361,7 +363,7 @@ python Contextual_Deepfake_Detector.py
 - Auto patch mode produces clearer and more interpretable results
 
 ---------------------------------------------------------------------------------------------
-
+--------------------------------------------------------------------------------------------- 
 # Example Commands
 
 **Training**
@@ -378,3 +380,176 @@ python Contextual_Deepfake_Detector.py
 
 **Full training and Visualization**
 `python Contextual_Deepfake_Detector.py --epochs 5 --batch_size 32 --lr 0.0001 --num_saliency 5 --num_occlusion 5 --use_auto_patch_size`
+
+---------------------------------------------------------------------------------------------
+--------------------------------------------------------------------------------------------- 
+# Running with tmux and Logging (Recommended for HPC)
+
+For long training jobs, use `tmux` with logging to prevent losing progress and output.
+
+---
+
+### Step 1: Request a GPU node
+
+```sh
+srun --cluster=chip-gpu --partition=gpu --gres=gpu:1 --mem=64G --time=05:00:00 --pty bash
+```
+
+---
+
+### Step 2: Start tmux
+
+```sh
+tmux
+```
+
+---
+
+### Step 3: Set up environment
+
+```sh
+module load Python/3.11.5-GCCcore-13.2.0
+python -m venv .venv
+source .venv/bin/activate
+
+export HF_HOME=/umbc/class/cmsc475sp26/common/<groupname>/hf_cache
+export TORCH_HOME=/umbc/class/cmsc475sp26/common/<groupname>/torch_cache
+export MPLCONFIGDIR=/umbc/class/cmsc475sp26/common/<groupname>/mpl_cache
+export PIP_CACHE_DIR=/umbc/class/cmsc475sp26/common/<groupname>/pip_cache
+mkdir -p $HF_HOME
+mkdir -p $TORCH_HOME
+mkdir -p $MPLCONFIGDIR
+mkdir -p $PIP_CACHE_DIR
+
+pip install -r requirements.txt
+```
+
+---
+
+### Step 4: Run training with logging
+
+```sh
+python Contextual_Deepfake_Detector.py --epochs 5 --batch_size 64 --lr 1e-4 --num_saliency 5 --num_occlusion 5 2>&1 | tee train.log
+```
+
+This will:
+- show output live
+- save all logs (including errors) to `train.log`
+
+---
+
+### Step 5: Detach from tmux
+
+Press:
+
+```
+Ctrl + B, then D
+```
+
+Training continues in the background.
+
+You may close the terminal window, but do not type any exit commands or the job will be killed.
+---
+
+### Step 6: Reattach later
+
+```sh
+tmux attach
+```
+
+---
+
+### View logs anytime
+
+```sh
+tail -f train.log
+```
+
+---
+
+## tmux & HPC FAQ
+
+### Will my training stop if I close my laptop or disconnect?
+No. If you are running inside `tmux`, your training will continue running on the cluster even if you disconnect.
+
+---
+
+### How do I safely disconnect without stopping the job?
+Detach from tmux:
+
+```
+Ctrl + B, then D
+```
+
+Do **not** use `exit` before detaching.
+
+---
+
+### How do I reconnect to my session later?
+```sh
+ssh <your_user>@<cluster>
+tmux attach
+```
+
+---
+
+### What happens if my job time expires?
+If the allocated time (e.g., 4 hours) ends:
+- The job stops
+- The tmux session is terminated
+- Training will not continue
+
+However:
+- Logs (`train.log`) are saved
+- Results and model checkpoints are preserved
+
+---
+
+### Where are my logs saved?
+All output is saved to:
+
+```sh
+train.log
+```
+
+You can view it with:
+
+```sh
+tail -f train.log
+```
+
+---
+
+### What if I forget to use tmux?
+If you disconnect without tmux, your training will likely stop and you may lose progress.
+
+---
+
+### Can I use tmux across different devices?
+Yes. You can start training on one device and reconnect from another using `tmux attach`.
+
+---
+
+### Does tmux save my results?
+No. tmux only keeps the session alive.
+
+Your results are saved separately in the `results/` directory.
+
+---
+
+### Why use logging with tmux?
+tmux does not permanently store output. Using:
+
+```sh
+2>&1 | tee train.log
+```
+
+ensures all logs are saved even after the session ends.
+
+---
+
+### What should I do if tmux session is gone?
+If the session is gone:
+- Check `train.log` for progress
+- Check the `results/` folder for outputs
+- Restart training if needed
