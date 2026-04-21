@@ -8,4 +8,5 @@ scikit-learn
 seaborn
 torch
 torchvision
+transformers
 tqdm
