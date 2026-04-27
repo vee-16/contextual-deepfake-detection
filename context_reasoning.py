@@ -8,6 +8,8 @@ real-world context using a pretrained CLIP model.
 
 from __future__ import annotations
 
+import argparse
+import json
 from pathlib import Path
 from typing import Dict, List, Sequence, Union
 
@@ -256,12 +258,45 @@ class ContextReasoner:
         }
 
 
+def _build_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Run contextual reasoning on a single image."
+    )
+    parser.add_argument(
+        "--image",
+        default="data/openfake/test/real/real_00000.png",
+        help="Path to the image to score.",
+    )
+    parser.add_argument(
+        "--threshold",
+        type=float,
+        default=0.5,
+        help='Decision threshold for "atypical" prediction (default: 0.5).',
+    )
+    parser.add_argument(
+        "--model-name",
+        default="openai/clip-vit-base-patch32",
+        help="Hugging Face CLIP model id to load.",
+    )
+    parser.add_argument(
+        "--formatted",
+        action="store_true",
+        help="Pretty-print JSON output for easier reading.",
+    )
+    return parser
+
+
 if __name__ == "__main__":
-    example_path = "data/openfake/test/real/real_00000.png"
-    reasoner = ContextReasoner()
+    parser = _build_arg_parser()
+    args = parser.parse_args()
+
+    reasoner = ContextReasoner(model_name=args.model_name, threshold=args.threshold)
 
     try:
-        result = reasoner.score_image(example_path)
-        print(result)
-    except Exception as exc: 
+        result = reasoner.score_image(args.image)
+        if args.pretty:
+            print(json.dumps(result, indent=2))
+        else:
+            print(json.dumps(result))
+    except Exception as exc:
         print(f"Failed to score image: {exc}")
