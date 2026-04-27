@@ -24,7 +24,7 @@ import csv
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.cm as mpl_cm
-from datasets import load_from_disk
+from initialize_dataset import load_all_chunks
 from torchvision import transforms
 from torch.utils.data import Dataset
 
@@ -674,7 +674,7 @@ if __name__ == "__main__":
                     image = self.transform(image)
                 return image, label
 
-        hf_test = load_from_disk(args.dataset_path)
+        hf_test = load_all_chunks(args.dataset_path)
         test_dataset = _TestDataset(hf_test, transform)
 
         save_attention_heatmaps(

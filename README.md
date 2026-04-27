@@ -90,12 +90,10 @@ cd contextual-deepfake-detection
 3. Request compute node
 
 ### Dataset Download (CPU node)
-`export HF_TOKEN=HF_hf_ACSQJZsjivsGlglOpNuXDPrSLTcFfnLrfO`
-
-`srun --cluster=chip-cpu --partition=general --mem=64G --time=05:00:00 --pty bash`
+`srun --cluster=chip-cpu --partition=general --mem=64G --time=06:00:00 --pty bash`
 
 ### Training (GPU node)
-`srun --cluster=chip-gpu --partition=gpu --gres=gpu:1 --mem=32G --time=05:00:00 --pty bash`
+`srun --cluster=chip-gpu --partition=gpu --gres=gpu:1 --mem=64G --time=06:00:00 --pty bash`
 
 - CPU nodes are recommended for dataset downloading. GPU nodes should be used for training.
 
@@ -129,10 +127,6 @@ mkdir -p $PIP_CACHE_DIR
 - TORCH_HOME: PyTorch model cache
 - MPLCONFIGDIR: Fixes matplotlib "No space left on device" errors on HPC
 - PIP_CACHE_DIR: Prevents pip install issues
-
-TODO:
-- [ ] look into tmux set up for persistent sessions
-- [ ] add instructions for ssh vscode client
 
 Continue to install dependencies and run the pipeline
 
@@ -178,6 +172,11 @@ This allows scaling to large datasets without memory issues.
 ---------------------------------------------------------------------------------------------
 ---------------------------------------------------------------------------------------------
 # Download dataset
+
+Run first (speeds up downloads):
+`export HF_TOKEN=HF_hf_ACSQJZsjivsGlglOpNuXDPrSLTcFfnLrfO`
+
+Command for dataset download (change sample size as needed):
 `python initialize_dataset.py --sample_size 100`
 
 The dataset will be downloaded and stored locally in:
@@ -380,176 +379,3 @@ Automatically selects the patch size that produces the strongest signal (slower,
 
 **Full training and Visualization**
 `python Contextual_Deepfake_Detector.py --epochs 5 --batch_size 32 --lr 0.0001 --num_saliency 5 --num_occlusion 5 --use_auto_patch_size`
-
----------------------------------------------------------------------------------------------
---------------------------------------------------------------------------------------------- 
-# Running with tmux and Logging (Recommended for HPC)
-
-For long training jobs, use `tmux` with logging to prevent losing progress and output.
-
----
-
-### Step 1: Request a GPU node
-
-```sh
-srun --cluster=chip-gpu --partition=gpu --gres=gpu:1 --mem=64G --time=05:00:00 --pty bash
-```
-
----
-
-### Step 2: Start tmux
-
-```sh
-tmux
-```
-
----
-
-### Step 3: Set up environment
-
-```sh
-module load Python/3.11.5-GCCcore-13.2.0
-python -m venv .venv
-source .venv/bin/activate
-
-export HF_HOME=/umbc/class/cmsc475sp26/common/<groupname>/hf_cache
-export TORCH_HOME=/umbc/class/cmsc475sp26/common/<groupname>/torch_cache
-export MPLCONFIGDIR=/umbc/class/cmsc475sp26/common/<groupname>/mpl_cache
-export PIP_CACHE_DIR=/umbc/class/cmsc475sp26/common/<groupname>/pip_cache
-mkdir -p $HF_HOME
-mkdir -p $TORCH_HOME
-mkdir -p $MPLCONFIGDIR
-mkdir -p $PIP_CACHE_DIR
-
-pip install -r requirements.txt
-```
-
----
-
-### Step 4: Run training with logging
-
-```sh
-python Contextual_Deepfake_Detector.py --epochs 5 --batch_size 64 --lr 1e-4 --num_saliency 5 --num_occlusion 5 2>&1 | tee train.log
-```
-
-This will:
-- show output live
-- save all logs (including errors) to `train.log`
-
----
-
-### Step 5: Detach from tmux
-
-Press:
-
-```
-Ctrl + B, then D
-```
-
-Training continues in the background.
-
-You may close the terminal window, but do not type any exit commands or the job will be killed.
----
-
-### Step 6: Reattach later
-
-```sh
-tmux attach
-```
-
----
-
-### View logs anytime
-
-```sh
-tail -f train.log
-```
-
----
-
-## tmux & HPC FAQ
-
-### Will my training stop if I close my laptop or disconnect?
-No. If you are running inside `tmux`, your training will continue running on the cluster even if you disconnect.
-
----
-
-### How do I safely disconnect without stopping the job?
-Detach from tmux:
-
-```
-Ctrl + B, then D
-```
-
-Do **not** use `exit` before detaching.
-
----
-
-### How do I reconnect to my session later?
-```sh
-ssh <your_user>@<cluster>
-tmux attach
-```
-
----
-
-### What happens if my job time expires?
-If the allocated time (e.g., 4 hours) ends:
-- The job stops
-- The tmux session is terminated
-- Training will not continue
-
-However:
-- Logs (`train.log`) are saved
-- Results and model checkpoints are preserved
-
----
-
-### Where are my logs saved?
-All output is saved to:
-
-```sh
-train.log
-```
-
-You can view it with:
-
-```sh
-tail -f train.log
-```
-
----
-
-### What if I forget to use tmux?
-If you disconnect without tmux, your training will likely stop and you may lose progress.
-
----
-
-### Can I use tmux across different devices?
-Yes. You can start training on one device and reconnect from another using `tmux attach`.
-
----
-
-### Does tmux save my results?
-No. tmux only keeps the session alive.
-
-Your results are saved separately in the `results/` directory.
-
----
-
-### Why use logging with tmux?
-tmux does not permanently store output. Using:
-
-```sh
-2>&1 | tee train.log
-```
-
-ensures all logs are saved even after the session ends.
-
----
-
-### What should I do if tmux session is gone?
-If the session is gone:
-- Check `train.log` for progress
-- Check the `results/` folder for outputs
-- Restart training if needed
