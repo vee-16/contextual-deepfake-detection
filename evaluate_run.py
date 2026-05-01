@@ -141,12 +141,14 @@ def evaluate_run(run_dir: str) -> dict:
 
 def load_attention_scores(run_dir: str) -> dict:
     """
-    Load the three attention-based score arrays saved by the training script.
+    Load the three attention-based score arrays saved by the training script,
+    plus the optional CLIP context score saved by evaluate_context_reasoner.py.
 
     Expected files in predictions/:
         test_perplexity.npy  — shape [N, 196]  per-patch perplexity per image
         test_cls_entropy.npy — shape [N]        CLS entropy scalar per image
         test_rollout.npy     — shape [N, 196]  rollout patch score per image
+        test_context_score.npy  — shape [N]        CLIP context score (optional)
 
     Returns dict with arrays, or None for missing files.
     """
@@ -157,6 +159,7 @@ def load_attention_scores(run_dir: str) -> dict:
         ("perplexity", "test_perplexity.npy"),
         ("cls_entropy", "test_cls_entropy.npy"),
         ("rollout",     "test_rollout.npy"),
+        ("context_score", "test_context_score.npy"),
     ]:
         path = os.path.join(pred_dir, fname)
         if os.path.isfile(path):
@@ -334,6 +337,29 @@ def analyze_attention_scores(
         print(f"Mean rollout std (fake images): {fake_mean:.4f}")
         print(f"Rollout ROC-AUC vs fake label: {roll_auc:.4f}")
         print("(Higher std = uneven patch influence = more anomalous scene structure)")
+
+    # --- CLIP Context Score ---
+    if scores["context_score"] is not None:
+        ctx = scores["context_score"]
+        real_mean = ctx[y_true == 0].mean()
+        fake_mean = ctx[y_true == 1].mean()
+
+        try:
+            ctx_auc = roc_auc_score(y_true, ctx)
+        except ValueError:
+            ctx_auc = float("nan")
+
+        analysis["context_score"] = {
+            "real_mean": real_mean,
+            "fake_mean": fake_mean,
+            "auc": ctx_auc,
+        }
+
+        print(f"\n=== CLIP Context Scores ===")
+        print(f"Mean context score (real images): {real_mean:.4f}")
+        print(f"Mean context score (fake images): {fake_mean:.4f}")
+        print(f"CLIP context ROC-AUC vs fake label: {ctx_auc:.4f}")
+        print("(Higher score = more atypical = more likely fake)")
 
     # --- Combined score ---
     if all(scores[k] is not None for k in ["perplexity", "cls_entropy", "rollout"]):
@@ -540,6 +566,7 @@ def save_results_csv(
     perp_auc = analysis.get("perplexity", {}).get("auc", float("nan"))
     cls_auc  = analysis.get("cls_entropy", {}).get("auc", float("nan"))
     roll_auc = analysis.get("rollout", {}).get("auc", float("nan"))
+    ctx_auc  = analysis.get("context_score", {}).get("auc", float("nan"))
     comb_auc = analysis.get("combined", {}).get("auc", float("nan"))
 
     with open(metrics_csv, "w", newline="", encoding="utf-8") as f:
@@ -547,7 +574,8 @@ def save_results_csv(
         writer.writerow([
             "accuracy", "precision", "recall", "f1_score", "roc_auc",
             "cm_00", "cm_01", "cm_10", "cm_11",
-            "perplexity_auc", "cls_entropy_auc", "rollout_auc", "combined_anomaly_auc",
+            "perplexity_auc", "cls_entropy_auc", "rollout_auc",
+            "context_score_auc", "combined_anomaly_auc",
         ])
         writer.writerow([
             f"{standard_metrics['accuracy']:.6f}",
@@ -559,6 +587,7 @@ def save_results_csv(
             f"{perp_auc:.6f}",
             f"{cls_auc:.6f}",
             f"{roll_auc:.6f}",
+            f"{ctx_auc:.6f}",
             f"{comb_auc:.6f}",
         ])
 
@@ -570,8 +599,9 @@ def save_results_csv(
     N = len(y_true)
 
     mean_perp   = scores["perplexity"].mean(axis=1) if scores["perplexity"] is not None else np.full(N, float("nan"))
-    cls_entropy = scores["cls_entropy"]             if scores["cls_entropy"] is not None else np.full(N, float("nan"))
-    roll_std    = scores["rollout"].std(axis=1)     if scores["rollout"] is not None     else np.full(N, float("nan"))
+    cls_entropy = scores["cls_entropy"]              if scores["cls_entropy"] is not None else np.full(N, float("nan"))
+    roll_std    = scores["rollout"].std(axis=1)      if scores["rollout"] is not None     else np.full(N, float("nan"))
+    context_score = scores["context_score"]            if scores["context_score"] is not None else np.full(N, float("nan"))
     combined    = analysis.get("combined", {}).get("scores", np.full(N, float("nan")))
     prob_fake   = y_prob if y_prob is not None else np.full(N, float("nan"))
 
@@ -580,7 +610,8 @@ def save_results_csv(
         writer = csv.writer(f)
         writer.writerow([
             "sample_idx", "true_label", "pred_label", "prob_fake",
-            "mean_perplexity", "cls_entropy", "rollout_std", "combined_anomaly_score",
+            "mean_perplexity", "cls_entropy", "rollout_std",
+            "context_score", "combined_anomaly_score",
         ])
         for i in range(N):
             writer.writerow([
@@ -591,6 +622,7 @@ def save_results_csv(
                 f"{mean_perp[i]:.6f}",
                 f"{cls_entropy[i]:.6f}",
                 f"{roll_std[i]:.6f}",
+                f"{context_score[i]:.6f}",
                 f"{combined[i]:.6f}" if not np.isnan(combined[i]) else "nan",
             ])
 

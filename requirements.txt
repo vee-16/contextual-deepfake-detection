@@ -10,3 +10,4 @@ torch
 torchvision
 transformers
 tqdm
+streamlit

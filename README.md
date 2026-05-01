@@ -11,8 +11,11 @@ The current baseline uses a pretrained Vision Transformer (ViT-B/16) fine-tuned 
 contextual-deepfake-detection/
 
 Contextual_Deepfake_Detector.py   # main training script
+context_reasoning.py              # stage-3 CLIP-based contextual scoring module
 initialize_dataset.py             # dataset download script
 evaluate_run.py                   # evaluation for a run
+evaluate_context_reasoner.py      # evaluation for the CLIP context reasoner
+app.py                            # Streamlit demo (upload an image, see the truth)
 check_gpu.py                      # GPU usage verification
 requirements.txt
 
@@ -174,7 +177,7 @@ This allows scaling to large datasets without memory issues.
 # Download dataset
 
 Run first (speeds up downloads):
-`export HF_TOKEN=HF_hf_ACSQJZsjivsGlglOpNuXDPrSLTcFfnLrfO`
+`export HF_TOKEN=<token>`
 
 Command for dataset download (change sample size as needed):
 `python initialize_dataset.py --sample_size 100`
@@ -224,6 +227,8 @@ The following metrics are computed:
     - F1 Score
     - ROC-AUC
     - Confusion Matrix
+    - Per-score ROC-AUC for perplexity, CLS entropy, rollout, and CLIP context score
+    - Combined anomaly score (weighted sum of attention-based scores)
 
 After training or inference completes, the evaluation script runs automatically.
 
@@ -236,6 +241,38 @@ Evaluation uses saved predictions:
         test_y_true.npy
         test_y_pred.npy
         test_y_prob.npy
+        test_perplexity.npy
+        test_cls_entropy.npy
+        test_rollout.npy
+        test_context_score.npy   (optional, see CLIP Context Reasoning section)
+
+---------------------------------------------------------------------------------------------
+---------------------------------------------------------------------------------------------   
+# CLIP Context Reasoning
+
+Stage-3 module that scores each image against typical/atypical text prompts using a pretrained
+CLIP model (`openai/clip-vit-base-patch32`). Produces a context score in [0, 1] where higher
+means more atypical (more likely fake).
+
+Run after training to score the test set and write `test_context_score.npy` into the run's
+predictions folder so `evaluate_run.py` can include it:
+
+`python evaluate_context_reasoner.py --save_to_run_dir results/<run_name>`
+
+Then re-run evaluation to pick up the new score:
+
+`python evaluate_run.py --run_dir results/<run_name>`
+
+---------------------------------------------------------------------------------------------
+---------------------------------------------------------------------------------------------   
+# Streamlit Demo
+
+Interactive demo that lets you upload an image and see classifier prediction, saliency map,
+occlusion map, and CLIP contextual scoring with top-firing prompts.
+
+`streamlit run app.py -- --checkpoint results/<run_name>/best_model.pth`
+
+The `--` is required so Streamlit forwards the `--checkpoint` flag to the script.
 
 ---------------------------------------------------------------------------------------------
 ---------------------------------------------------------------------------------------------   
@@ -379,3 +416,9 @@ Automatically selects the patch size that produces the strongest signal (slower,
 
 **Full training and Visualization**
 `python Contextual_Deepfake_Detector.py --epochs 5 --batch_size 32 --lr 0.0001 --num_saliency 5 --num_occlusion 5 --use_auto_patch_size`
+
+**CLIP context evaluation (after training)**
+`python evaluate_context_reasoner.py --save_to_run_dir results/<run_name>`
+
+**Streamlit demo**
+`streamlit run app.py -- --checkpoint results/<run_name>/best_model.pth`
