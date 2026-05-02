@@ -422,3 +422,39 @@ Automatically selects the patch size that produces the strongest signal (slower,
 
 **Streamlit demo**
 `streamlit run app.py -- --checkpoint results/<run_name>/best_model.pth`
+
+---------------------------------------------------------------------------------------------
+
+# Single Image Explanation
+(results/demo_explanation/explanation_report.png)
+This project now includes a single-image explanation pipeline that generates a comprehensive interpretability report for any input image.
+
+This feature combines multiple signals:
+
+Model prediction (real vs fake) with confidence
+Saliency map (pixel-level importance)
+Occlusion map + bounding box (region-level importance)
+Attention rollout heatmap (transformer-level reasoning)
+CLIP context reasoning score (semantic consistency)
+
+Run Explanation on One Image:
+
+python explain_image.py \
+  --image path/to/image.jpg \
+  --checkpoint results/<run_name>/best_model.pth \
+  --output_dir results/demo_explanation
+
+The script generates:
+
+results/demo_explanation/
+├── explanation_report.png   # Visual summary (demo-ready)
+└── explanation_report.json  # Raw scores and metadata
+
+Explanation Report Includes:
+
+Prediction: real or fake
+Confidence: model probability
+Saliency Map: pixel-level influence
+Occlusion Map: region importance + bounding box
+Attention Rollout: patch-level influence across transformer layers
+CLIP Context Score: measures how "typical" or "atypical" the image is 
